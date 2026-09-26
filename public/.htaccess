@@ -1,0 +1,26 @@
+# ============================================
+# SÉCURITÉ DU DOSSIER PUBLIC
+# ============================================
+# Ce fichier protège le dossier public/ lorsqu'il est atteint
+# directement via /petites_annonces/public/.
+#
+# La règle principale de blocage se trouve dans le .htaccess
+# de la racine du projet (rewrite vers public/index.php).
+# Ce fichier ajoute une seconde barrière (défense en profondeur).
+# ============================================
+
+# Pas de listing de répertoires
+Options -Indexes
+
+# Fichier servi par défaut
+DirectoryIndex index.php
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Bloque les fichiers et dossiers cachés (.env, .git...)
+    RewriteRule (^|/)\. - [F,L]
+
+    # Bloque les fichiers sensibles (config, doc, dumps, logs)
+    RewriteRule ^(composer\.(json|lock)|.*\.(md|lock|sql|log|ini))$ - [F,L]
+</IfModule>

@@ -1,0 +1,52 @@
+# ============================================
+# RÉÉCRITURE D'URL - RACINE DU PROJET
+# ============================================
+# Permet d'accéder à l'application via :
+#   http://localhost/petites_annonces/
+# sans avoir à écrire /public dans l'URL.
+#
+# Toutes les requêtes sont transmises à public/index.php
+# sauf les fichiers réels situés dans public/
+# (CSS, JS, images) qui doivent être servis directement.
+# ============================================
+
+# --- Listing de répertoires désactivé ---
+# Empêche l'affichage du contenu d'un dossier dépourvu de fichier index.
+Options -Indexes
+
+RewriteEngine On
+
+# Base de réécriture : le projet est accessible sous /petites_annonces/
+RewriteBase /petites_annonces/
+
+# --- 0. Blocage des dossiers sensibles ---
+# app/, core/, config/, database/, storage/, vendor/
+# → renvoie une erreur 403 Forbidden
+RewriteRule ^(app|core|config|database|storage|vendor)(/|$) - [F,L]
+
+# --- 0bis. Blocage des fichiers sensibles ---
+# Fichiers et dossiers cachés (.env, .git, .gitignore, .htaccess...)
+RewriteRule ^\. - [F,L]
+
+# Fichiers de configuration et de documentation à la racine
+RewriteRule ^(composer\.(json|lock)|README\.md|phpunit\.xml(\.dist)?)$ - [F,L]
+
+# --- 1. Fichiers statiques du répertoire public/ ---
+# Si l'URL commence par /public/ ET que le fichier existe
+# réellement sur le disque, on le sert sans réécriture.
+RewriteCond %{REQUEST_URI} ^/petites_annonces/public/ [NC]
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ - [L]
+
+# --- 2. La racine du projet ---
+# /petites_annonces/ et /petites_annonces (sans slash)
+# doivent être routées vers public/index.php.
+RewriteRule ^$ public/index.php [L]
+RewriteRule ^/$ public/index.php [L]
+
+# --- 3. Toutes les autres requêtes ---
+# Toute URL qui ne correspond pas à un fichier/dossier
+# réel du système de fichiers est envoyée à public/index.php.
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ public/index.php [L]

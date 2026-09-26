@@ -1,0 +1,18 @@
+# ============================================
+# ACCÈS DIRECT INTERDIT
+# ============================================
+# Défense en profondeur : le dossier vendor/ ne doit jamais être
+# accessible directement depuis le navigateur.
+# La règle principale est déjà définie dans le .htaccess racine.
+# ============================================
+
+# Apache 2.4+
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+
+# Apache 2.2 (compatibilité)
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+</IfModule>

@@ -1,0 +1,25 @@
+{
+    "name": "petites-annonces/app",
+    "description": "Plateforme web de petites annonces destinée au Sénégal.",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.2",
+        "ext-pdo": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/",
+            "App\\Core\\": "core/"
+        },
+        "files": [
+            "core/helpers.php"
+        ]
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Core\Auth;
 use App\Core\Controller;
 use App\Core\Csrf;
 use App\Core\Session;
@@ -384,9 +385,14 @@ class AuthController extends Controller
      */
     public function login(): void
     {
-        // Session déjà authentifiée : inutile de réafficher le formulaire
+        // Session déjà authentifiée : inutile de réafficher le formulaire.
+        // Défense en profondeur : la route GET /auth/login est déjà protégée
+        // par GuestMiddleware, mais si cette action était atteinte malgré tout,
+        // l'utilisateur est renvoyé vers l'espace de son rôle plutôt que vers
+        // l'accueil public. Le rôle est lu exclusivement en session
+        // (currentRole()) : aucune donnée du client n'intervient.
         if ($this->isAuthenticated()) {
-            $this->redirect(base_path('/'));
+            $this->redirect(Auth::dashboardPath($this->currentRole()));
         }
 
         $this->renderLoginForm();
@@ -527,9 +533,15 @@ class AuthController extends Controller
         );
 
         // ------------------------------------------------------------
-        // 7. Redirection vers la page d'accueil
+        // 7. Redirection vers l'espace du rôle
         // ------------------------------------------------------------
-        $this->redirect(base_path('/'));
+        // Le rôle vient d'être écrit en session à partir de la ligne `users`
+        // (findActiveByEmail() et password_verify() ont déjà réussi).
+        // currentRole() relit cette valeur en session : une seule source de
+        // vérité, aucune donnée fournie par le client. Auth::dashboardPath()
+        // ne fait que construire l'URL de destination ; un rôle inconnu
+        // renverrait l'espace public.
+        $this->redirect(Auth::dashboardPath($this->currentRole()));
     }
 
     /**
@@ -537,7 +549,7 @@ class AuthController extends Controller
      *
      * Enchaînement : vérification CSRF → destruction de la session
      * authentifiée → création d'une nouvelle session anonyme avec un
-     * nouvel identifiant de session → redirection vers la page d'accueil.
+     * nouvel identifiant de session → redirection vers la page de connexion.
      *
      * La session n'est jamais touchée avant la validation du token CSRF :
      * une requête dépourvue de token valide laisse l'utilisateur connecté.
@@ -586,9 +598,13 @@ class AuthController extends Controller
         }
 
         // ------------------------------------------------------------
-        // 4. Redirection vers la page d'accueil
+        // 4. Redirection vers la page de connexion
         // ------------------------------------------------------------
-        $this->redirect(base_path('/'));
+        // L'utilisateur déconnecté est renvoyé vers le formulaire de
+        // connexion (et non vers l'accueil public) : il peut se reconnecter
+        // immédiatement. Session::destroy() a déjà été appelé ci-dessus ;
+        // seule la destination change ici.
+        $this->redirect(base_path('auth/login'));
     }
 
     /**

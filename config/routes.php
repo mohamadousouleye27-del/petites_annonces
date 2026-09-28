@@ -2,10 +2,14 @@
 
 declare(strict_types=1);
 
+use App\Controllers\AdminController;
 use App\Controllers\AuthController;
 use App\Controllers\HomeController;
+use App\Controllers\MembreController;
+use App\Controllers\ModerateurController;
 use App\Middleware\AuthMiddleware;
 use App\Middleware\GuestMiddleware;
+use App\Middleware\RoleMiddleware;
 
 /**
  * Tableau des routes de l'application.
@@ -79,8 +83,137 @@ return [
     ],
 
     // ============================================
+    // Espace Membre — rôle requis : member
+    // ============================================
+    // Cloisonnement STRICT : ces routes n'acceptent que le rôle « member ».
+    //   - visiteur anonyme               → 302 vers /auth/login (AuthMiddleware)
+    //   - connecté avec un autre rôle    → 403 (RoleMiddleware)
+    // Aucune hiérarchie de rôles : admin et moderateur ne sont PAS membres.
+    [
+        'method'     => 'GET',
+        'path'       => '/membre',
+        'handler'    => [MembreController::class, 'dashboard'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'member']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/membre/annonces',
+        'handler'    => [MembreController::class, 'annonces'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'member']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/membre/favoris',
+        'handler'    => [MembreController::class, 'favoris'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'member']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/membre/messages',
+        'handler'    => [MembreController::class, 'messages'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'member']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/membre/profil',
+        'handler'    => [MembreController::class, 'profil'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'member']],
+    ],
+
+    // ============================================
+    // Espace Modérateur — rôle requis : moderateur
+    // ============================================
+    // Cloisonnement STRICT : ces routes n'acceptent que le rôle « moderateur ».
+    //   - visiteur anonyme            → 302 vers /auth/login (AuthMiddleware)
+    //   - connecté avec un autre rôle → 403 (RoleMiddleware)
+    // Aucune hiérarchie : member et admin ne sont PAS modérateurs.
+    [
+        'method'     => 'GET',
+        'path'       => '/moderateur',
+        'handler'    => [ModerateurController::class, 'dashboard'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'moderateur']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/moderateur/signalements',
+        'handler'    => [ModerateurController::class, 'signalements'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'moderateur']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/moderateur/annonces',
+        'handler'    => [ModerateurController::class, 'annonces'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'moderateur']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/moderateur/utilisateurs',
+        'handler'    => [ModerateurController::class, 'utilisateurs'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'moderateur']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/moderateur/journal',
+        'handler'    => [ModerateurController::class, 'journal'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'moderateur']],
+    ],
+
+    // ============================================
+    // Espace Administrateur — rôle requis : admin
+    // ============================================
+    // Cloisonnement STRICT : ces routes n'acceptent que le rôle « admin ».
+    //   - visiteur anonyme            → 302 vers /auth/login (AuthMiddleware)
+    //   - connecté avec un autre rôle → 403 (RoleMiddleware)
+    // Aucune hiérarchie : member et moderateur ne sont PAS administrateurs.
+    [
+        'method'     => 'GET',
+        'path'       => '/admin',
+        'handler'    => [AdminController::class, 'dashboard'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'admin']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/admin/utilisateurs',
+        'handler'    => [AdminController::class, 'utilisateurs'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'admin']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/admin/annonces',
+        'handler'    => [AdminController::class, 'annonces'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'admin']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/admin/categories',
+        'handler'    => [AdminController::class, 'categories'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'admin']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/admin/villes',
+        'handler'    => [AdminController::class, 'villes'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'admin']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/admin/signalements',
+        'handler'    => [AdminController::class, 'signalements'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'admin']],
+    ],
+    [
+        'method'     => 'GET',
+        'path'       => '/admin/journal',
+        'handler'    => [AdminController::class, 'journal'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'admin']],
+    ],
+
+    // ============================================
     // ROUTES À VENIR (contrôleurs pas encore implémentés)
     // ============================================
+    // Les trois espaces connectés (/membre, /moderateur, /admin) sont
+    // désormais déclarés ci-dessus. Les blocs commentés restent indicatifs
+    // pour le parcours public (annonces, favoris, messages, profil).
     // Les contrôleurs ci-dessous n'existent pas encore : déclarer
     // leurs routes provoquerait une erreur 500 (classe introuvable).
     // Chaque bloc sera décommenté dès que le contrôleur correspondant

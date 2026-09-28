@@ -47,6 +47,96 @@ abstract class Controller
     }
 
     /**
+     * Charge une vue dans un layout.
+     *
+     * Le rendu de la vue est d'abord capturé en mémoire (tampon), puis
+     * injecté dans un layout qui reçoit la variable $content (HTML déjà
+     * rendu) ainsi que les mêmes données que la vue.
+     *
+     * Cette méthode sert aux espaces connectés (membre, modérateur,
+     * administrateur) qui partagent une sidebar, une topbar, un badge de
+     * rôle et un menu utilisateur.
+     *
+     * Elle ne remplace PAS view() : elle s'appuie dessus sans en modifier
+     * le comportement. view() reste utilisable telle quelle et peut être
+     * appelée directement pour les pages sans layout commun (accueil,
+     * authentification).
+     *
+     * Aucun rôle n'est contrôlé ici : le cloisonnement RBAC relève
+     * exclusivement des middlewares (AuthMiddleware, RoleMiddleware).
+     *
+     * @param string $view Chemin de la vue (relatif au dossier app/Views, sans extension .php)
+     * @param array<string, mixed> $data Données transmises à la vue ET au layout
+     * @param string $layout Chemin du layout (relatif au dossier app/Views, sans extension .php)
+     * @return void
+     */
+    protected function viewWithLayout(
+        string $view,
+        array $data = [],
+        string $layout = 'layouts/connected'
+    ): void {
+        // 0. Helpers d'affichage du layout : chargés AVANT la vue, car la vue
+        //    est rendue en premier et partage ces fonctions (icônes, formats,
+        //    badges) avec le layout.
+        $this->loadLayoutHelpers($layout);
+
+        // 1. Rendu de la vue dans un tampon mémoire : aucune sortie immédiate
+        ob_start();
+
+        try {
+            $this->view($view, $data);
+        } catch (\Throwable $e) {
+            // Aucune sortie partielle : le tampon est vidé avant de propager
+            ob_end_clean();
+
+            throw $e;
+        }
+
+        $content = (string) ob_get_clean();
+
+        // 2. Rendu du layout : la clé « content » est fusionnée en dernier,
+        //    afin qu'une clé homonyme fournie par l'appelant ne puisse pas
+        //    écraser le contenu réellement rendu.
+        $this->view($layout, array_merge($data, ['content' => $content]));
+    }
+
+    /**
+     * Charge les helpers d'affichage associés à un layout, s'ils existent.
+     *
+     * Convention de nommage :
+     *   app/Views/<dossier du layout>/partials/<nom du layout>-helpers.php
+     *   'layouts/connected' → app/Views/layouts/partials/connected-helpers.php
+     *
+     * Ce fichier regroupe des fonctions d'affichage pures (icônes, formats,
+     * badges) partagées par le layout ET par les vues qu'il encadre. Il est
+     * chargé AVANT le rendu de la vue, puisque celle-ci est rendue en premier.
+     *
+     * Le chargement est silencieux si le fichier est absent : un layout sans
+     * helpers reste utilisable. Les fonctions sont de plus gardées par
+     * function_exists() pour rester sûres en cas d'inclusion multiple.
+     *
+     * @param string $layout Chemin du layout (relatif au dossier app/Views)
+     * @return void
+     */
+    private function loadLayoutHelpers(string $layout): void
+    {
+        $dossier = dirname($layout);
+
+        if ($dossier === '.') {
+            $dossier = '';
+        } elseif ($dossier !== '') {
+            $dossier .= '/';
+        }
+
+        $chemin = APP_PATH . '/Views/' . $dossier
+            . 'partials/' . basename($layout) . '-helpers.php';
+
+        if (is_file($chemin)) {
+            require_once $chemin;
+        }
+    }
+
+    /**
      * Redirige l'utilisateur vers une autre URL.
      *
      * @param string $url URL de destination (peut être un chemin relatif ou absolu)

@@ -6,34 +6,38 @@ namespace App\Controllers;
 
 use App\Core\Controller;
 use App\Core\Session;
+use App\Models\Annonce;
+use App\Models\AuditLog;
+use App\Models\Signalement;
+use App\Models\User;
 
 /**
- * Contrôleur de l'espace Modérateur.
+ * Contrôleur de l'espace Modérateur — PALIER 7.2 (LECTURE SEULE).
  *
- * PÉRIMÈTRE (étape 3) : interfaces et layout uniquement.
- *   - AUCUNE requête SQL, AUCUN modèle : les données affichées sont
- *     statiques (fictives), comme dans HomeController ;
- *     le branchement sur la base est prévu à l'étape 7 ;
- *   - le cloisonnement RBAC n'est PAS géré ici : les routes de cet espace
- *     sont protégées dans config/routes.php par
- *     AuthMiddleware + [RoleMiddleware::class, 'moderateur'] ;
- *   - le contrôleur ne lit que deux clés de session déjà renseignées à la
- *     connexion (user_prenom, user_role) pour l'affichage de l'identité.
+ * Les 5 écrans de l'espace Modérateur sont désormais alimentés par les
+ * données RÉELLES de la base MariaDB, via les modèles de lecture du
+ * palier 7.0 :
  *
- * RESPONSABILITÉS DU RÔLE (colonnes concernées en base) :
- *   - `signalements` (raison, status, resolved_at, resolved_by) → traiter ou
- *     rejeter les signalements ;
- *   - `annonces` (status) → approuver ou suspendre les annonces soumises ;
- *   - `users` (rôle, status) → CONSULTATION seule, sans action ;
- *   - `audit_logs` (action, description, ip_address, target_type) → journal
- *     de ses propres actions de modération.
+ *   GET /moderateur               → dashboard()     Signalement, Annonce, User
+ *   GET /moderateur/signalements  → signalements()  Signalement
+ *   GET /moderateur/annonces      → annonces()      Annonce, AuditLog
+ *   GET /moderateur/utilisateurs  → utilisateurs()  User
+ *   GET /moderateur/journal       → journal()       AuditLog
  *
- * Routes associées :
- *   GET /moderateur               → dashboard()
- *   GET /moderateur/signalements  → signalements()
- *   GET /moderateur/annonces      → annonces()
- *   GET /moderateur/utilisateurs  → utilisateurs()
- *   GET /moderateur/journal       → journal()
+ * RÈGLES RESPECTÉES
+ *   - AUCUNE requête SQL ici ni dans les vues : tout passe par les méthodes
+ *     préparées des modèles (1 appel = 1 requête, pas de N+1) ;
+ *   - AUCUNE action de modération : ce palier est STRICTEMENT en lecture.
+ *     Les décisions (valider / rejeter / suspendre une annonce, traiter un
+ *     signalement, bannir un compte...) seront implémentées dans un palier
+ *     ultérieur. Les boutons affichés sont inactifs (disabled) et ne
+ *     déclenchent aucune écriture ;
+ *   - le journal de /moderateur/journal est PERSONNEL : il est filtré sur
+ *     l'identifiant de session `user_id` du modérateur connecté, jamais sur
+ *     un identifiant fourni par l'URL ;
+ *   - le cloisonnement RBAC reste assuré par les middlewares déclarés dans
+ *     config/routes.php (AuthMiddleware + RoleMiddleware 'moderateur').
+ *     Ce contrôleur ne prend aucune décision d'autorisation.
  *
  * @package App\Controllers
  */
@@ -51,28 +55,55 @@ class ModerateurController extends Controller
      *
      * Volontairement constant : l'espace est réservé au rôle « moderateur »
      * par RoleMiddleware, il ne peut donc afficher que ce rôle.
-     * App\Core\Auth::label() (étape 5) centralisera les libellés.
      *
      * @var string
      */
     private const ROLE_LABEL = 'Modérateur';
 
     /**
+     * Nombre maximal d'éléments chargés pour une liste complète.
+     *
+     * Borne de présentation : les modèles appliquent eux-mêmes leur propre
+     * plafond (LIMITE_MAX).
+     *
+     * @var int
+     */
+    private const LIMITE_LISTE = 100;
+
+    /**
+     * Nombre d'éléments récents affichés sur le tableau de bord.
+     *
+     * @var int
+     */
+    private const DERNIERS_ELEMENTS = 4;
+
+    /**
+     * Nombre de dernières décisions affichées sous la file d'annonces.
+     *
+     * @var int
+     */
+    private const DERNIERES_DECISIONS = 4;
+
+    /**
      * Tableau de bord de la modération (GET /moderateur).
+     *
+     * Statistiques agrégées (compteurs par statut) et aperçus des files de
+     * modération, tous calculés par les modèles à partir de MariaDB.
      *
      * @return void
      */
     public function dashboard(): void
     {
-        $signalements = $this->getSignalements();
+        $signalements = (new Signalement())->listerTous(self::DERNIERS_ELEMENTS);
+        $annonces = (new Annonce())->listerParStatut('en_attente', self::DERNIERS_ELEMENTS);
 
         $donnees = $this->pageData(
             'Tableau de bord',
             'File de modération et activité récente'
         ) + [
             'stats'        => $this->getStats(),
-            'signalements' => array_slice($signalements, 0, 4),
-            'annonces'     => array_slice($this->getAnnoncesAModerer(), 0, 4),
+            'signalements' => $signalements,
+            'annonces'     => $annonces,
         ];
 
         $this->viewWithLayout('moderateur/dashboard', $donnees);
@@ -85,32 +116,44 @@ class ModerateurController extends Controller
      */
     public function signalements(): void
     {
-        $signalements = $this->getSignalements();
+        $modele = new Signalement();
 
         $donnees = $this->pageData(
             'Signalements',
             'Signalements déposés par les membres'
         ) + [
-            'signalements' => $signalements,
-            'compteurs'    => $this->getCompteursSignalements($signalements),
+            'signalements' => $modele->listerTous(self::LIMITE_LISTE),
+            'compteurs'    => [
+                'total'      => $modele->compterTous(),
+                'en_attente' => $modele->compterParStatut('en_attente'),
+                'traite'     => $modele->compterParStatut('traite'),
+                'rejete'     => $modele->compterParStatut('rejete'),
+            ],
         ];
 
         $this->viewWithLayout('moderateur/signalements', $donnees);
     }
 
     /**
-     * Annonces en attente de validation (GET /moderateur/annonces).
+     * Annonces en attente de décision (GET /moderateur/annonces).
+     *
+     * La file d'attente provient du statut réel 'en_attente' de l'ENUM
+     * `annonces.status`. Les dernières décisions sont lues dans le journal
+     * d'audit (`audit_logs`), la table `annonces` ne comportant aucune
+     * colonne `updated_at`.
      *
      * @return void
      */
     public function annonces(): void
     {
+        $modele = new Annonce();
+
         $donnees = $this->pageData(
             'Annonces à modérer',
             'Annonces soumises en attente de décision'
         ) + [
-            'annonces'    => $this->getAnnoncesAModerer(),
-            'recentes'    => $this->getAnnoncesRecentes(),
+            'annonces' => $modele->listerParStatut('en_attente', self::LIMITE_LISTE),
+            'recentes' => (new AuditLog())->listerParTypeCible('annonce', self::DERNIERES_DECISIONS),
         ];
 
         $this->viewWithLayout('moderateur/annonces', $donnees);
@@ -120,7 +163,8 @@ class ModerateurController extends Controller
      * Consultation des comptes (GET /moderateur/utilisateurs).
      *
      * Page en LECTURE SEULE : le rôle modérateur ne modifie ni les rôles ni
-     * les statuts des comptes (réservé à l'espace administrateur).
+     * les statuts des comptes (réservé à l'espace administrateur). Le mot de
+     * passe n'est jamais sélectionné par le modèle.
      *
      * @return void
      */
@@ -130,24 +174,31 @@ class ModerateurController extends Controller
             'Utilisateurs',
             'Consultation des comptes — lecture seule'
         ) + [
-            'utilisateurs' => $this->getUtilisateurs(),
+            'utilisateurs' => (new User())->listerTous(self::LIMITE_LISTE),
         ];
 
         $this->viewWithLayout('moderateur/utilisateurs', $donnees);
     }
 
     /**
-     * Journal des actions de modération (GET /moderateur/journal).
+     * Journal personnel des actions de modération (GET /moderateur/journal).
+     *
+     * Le journal est filtré sur l'identifiant de session du modérateur
+     * connecté : il ne voit que ses propres actions.
      *
      * @return void
      */
     public function journal(): void
     {
+        $userId = $this->utilisateurId();
+
         $donnees = $this->pageData(
             'Mon journal',
             'Historique de vos actions de modération'
         ) + [
-            'journal' => $this->getJournal(),
+            'journal' => $userId !== null
+                ? (new AuditLog())->listerParUtilisateur($userId, self::LIMITE_LISTE)
+                : [],
         ];
 
         $this->viewWithLayout('moderateur/journal', $donnees);
@@ -191,6 +242,66 @@ class ModerateurController extends Controller
             'nom'    => '',
             'email'  => '',
             'role'   => $this->currentRole(),
+        ];
+    }
+
+    /**
+     * Identifiant de l'utilisateur authentifié (clé de session `user_id`).
+     *
+     * C'est LA seule source d'identité du modérateur : jamais un paramètre
+     * d'URL. Une valeur absente ou non textuelle renvoie null, ce qui conduit
+     * le journal à afficher un état vide plutôt qu'une erreur ou le journal
+     * d'un autre utilisateur.
+     *
+     * @return string|null UUID du modérateur connecté, ou null
+     */
+    private function utilisateurId(): ?string
+    {
+        $id = Session::get('user_id');
+
+        if (!is_string($id)) {
+            return null;
+        }
+
+        $id = trim($id);
+
+        return $id === '' ? null : $id;
+    }
+
+    /**
+     * Cartes de statistiques du tableau de bord.
+     *
+     * Chaque valeur est un compteur réel calculé par un modèle (agrégat
+     * COUNT) : aucune donnée n'est inventée.
+     *
+     * @return array<int, array<string, string>>
+     */
+    private function getStats(): array
+    {
+        $annonce = new Annonce();
+        $signalement = new Signalement();
+
+        return [
+            [
+                'icone'  => 'signalements',
+                'valeur' => number_format($signalement->compterParStatut('en_attente'), 0, ',', ' '),
+                'label'  => 'Signalements en attente',
+            ],
+            [
+                'icone'  => 'annonces',
+                'valeur' => number_format($annonce->compterParStatut('en_attente'), 0, ',', ' '),
+                'label'  => 'Annonces à modérer',
+            ],
+            [
+                'icone'  => 'valider',
+                'valeur' => number_format($annonce->compterParStatut('active'), 0, ',', ' '),
+                'label'  => 'Annonces publiées',
+            ],
+            [
+                'icone'  => 'utilisateurs',
+                'valeur' => number_format((new User())->compter(), 0, ',', ' '),
+                'label'  => 'Utilisateurs inscrits',
+            ],
         ];
     }
 
@@ -249,364 +360,4 @@ class ModerateurController extends Controller
             ['label' => 'Mon journal',        'href' => base_path('moderateur/journal'),      'icone' => 'journal'],
         ];
     }
-
-    /**
-     * Cartes de statistiques du tableau de bord (données fictives).
-     *
-     * Les deux premiers compteurs sont dérivés des données des listes afin
-     * que le tableau de bord et les files restent cohérents entre eux.
-     *
-     * @return array<int, array<string, string>>
-     */
-    private function getStats(): array
-    {
-        $signalementsEnAttente = 0;
-
-        foreach ($this->getSignalements() as $signalement) {
-            if (($signalement['statut'] ?? '') === 'en_attente') {
-                $signalementsEnAttente++;
-            }
-        }
-
-        return [
-            [
-                'icone'  => 'signalements',
-                'valeur' => (string) $signalementsEnAttente,
-                'label'  => 'Signalements en attente',
-            ],
-            [
-                'icone'  => 'annonces',
-                'valeur' => (string) count($this->getAnnoncesAModerer()),
-                'label'  => 'Annonces à valider',
-            ],
-            [
-                'icone'  => 'valider',
-                'valeur' => '12',
-                'label'  => "Décisions aujourd'hui",
-            ],
-            [
-                'icone'  => 'journal',
-                'valeur' => '38',
-                'label'  => 'Actions cette semaine',
-            ],
-        ];
-    }
-
-    /**
-     * Signalements déposés par les membres (données fictives).
-     *
-     * Colonnes alignées sur la table `signalements` : annonce_id, user_id
-     * (signaleur), raison, status, created_at. Les statuts reprennent
-     * exactement l'ENUM de la base : 'en_attente', 'traite', 'rejete'.
-     *
-     * @return array<int, array<string, string>>
-     */
-    private function getSignalements(): array
-    {
-        return [
-            [
-                'annonce'     => 'iPhone 14 Pro — 128 Go',
-                'raison'      => 'Prix trompeur',
-                'signale_par' => 'Awa Sow',
-                'auteur'      => 'yaya',
-                'date'        => 'Il y a 20 minutes',
-                'statut'      => 'en_attente',
-            ],
-            [
-                'annonce'     => 'Terrain 300 m² à Diamniadio',
-                'raison'      => 'Annonce en doublon',
-                'signale_par' => 'Ibrahima Fall',
-                'auteur'      => 'Mohamadou',
-                'date'        => 'Il y a 1 heure',
-                'statut'      => 'en_attente',
-            ],
-            [
-                'annonce'     => 'Scooter électrique neuf',
-                'raison'      => 'Contenu inapproprié',
-                'signale_par' => 'Fatou Bâ',
-                'auteur'      => 'Ousmane Diallo',
-                'date'        => 'Il y a 3 heures',
-                'statut'      => 'en_attente',
-            ],
-            [
-                'annonce'     => 'Machine à coudre industrielle',
-                'raison'      => 'Vendeur injoignable',
-                'signale_par' => 'Aminata Diop',
-                'auteur'      => 'Awa Sow',
-                'date'        => 'Hier',
-                'statut'      => 'en_attente',
-            ],
-            [
-                'annonce'     => 'Climatiseur split 1,5 CV',
-                'raison'      => 'Prix trompeur',
-                'signale_par' => 'Moussa Ndiaye',
-                'auteur'      => 'Ibrahima Fall',
-                'date'        => 'Hier',
-                'statut'      => 'traite',
-            ],
-            [
-                'annonce'     => 'Ordinateur portable HP i5',
-                'raison'      => 'Annonce en doublon',
-                'signale_par' => 'Ousmane Diallo',
-                'auteur'      => 'Fatou Bâ',
-                'date'        => 'Il y a 2 jours',
-                'statut'      => 'rejete',
-            ],
-        ];
-    }
-
-    /**
-     * Compteurs par statut, dérivés de la liste des signalements.
-     *
-     * Les clés correspondent exactement à l'ENUM `signalements.status` de la
-     * base ('en_attente', 'traite', 'rejete').
-     *
-     * @param array<int, array<string, string>> $signalements Signalements
-     * @return array<string, int> Nombre de signalements par statut
-     */
-    private function getCompteursSignalements(array $signalements): array
-    {
-        $compteurs = [
-            'total'      => count($signalements),
-            'en_attente' => 0,
-            'traite'     => 0,
-            'rejete'     => 0,
-        ];
-
-        foreach ($signalements as $signalement) {
-            $statut = $signalement['statut'] ?? null;
-
-            if (is_string($statut) && array_key_exists($statut, $compteurs)) {
-                $compteurs[$statut]++;
-            }
-        }
-
-        return $compteurs;
-    }
-
-    /**
-     * Annonces en attente de validation (données fictives).
-     *
-     * Colonnes alignées sur la table `annonces` : titre, user_id (membre),
-     * categorie_id, type_annonce, prix, created_at, status = 'en_attente'.
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    private function getAnnoncesAModerer(): array
-    {
-        return [
-            [
-                'titre'        => 'Samsung Galaxy S23 Ultra 256 Go',
-                'membre'       => 'Mohamadou',
-                'categorie'    => 'Téléphones',
-                'type'         => 'Vente',
-                'prix'         => 850000,
-                'suffixe'      => '',
-                'soumis'       => 'Il y a 35 minutes',
-                'signalements' => 0,
-            ],
-            [
-                'titre'        => 'Terrain 300 m² à Diamniadio',
-                'membre'       => 'Mohamadou',
-                'categorie'    => 'Immobilier',
-                'type'         => 'Vente',
-                'prix'         => 24000000,
-                'suffixe'      => '',
-                'soumis'       => 'Il y a 1 heure',
-                'signalements' => 1,
-            ],
-            [
-                'titre'        => 'Scooter électrique neuf',
-                'membre'       => 'Ousmane Diallo',
-                'categorie'    => 'Véhicules',
-                'type'         => 'Vente',
-                'prix'         => 650000,
-                'suffixe'      => '',
-                'soumis'       => 'Il y a 3 heures',
-                'signalements' => 1,
-            ],
-            [
-                'titre'        => 'Climatiseur split 1,5 CV',
-                'membre'       => 'Ibrahima Fall',
-                'categorie'    => 'Maison',
-                'type'         => 'Vente',
-                'prix'         => 285000,
-                'suffixe'      => '',
-                'soumis'       => 'Hier',
-                'signalements' => 0,
-            ],
-            [
-                'titre'        => 'Machine à coudre industrielle',
-                'membre'       => 'Awa Sow',
-                'categorie'    => 'Maison',
-                'type'         => 'Vente',
-                'prix'         => 320000,
-                'suffixe'      => '',
-                'soumis'       => 'Hier',
-                'signalements' => 1,
-            ],
-        ];
-    }
-
-    /**
-     * Annonces récemment traitées par la modération (données fictives).
-     *
-     * @return array<int, array<string, string>>
-     */
-    private function getAnnoncesRecentes(): array
-    {
-        return [
-            [
-                'titre'    => 'Climatiseur split 1,5 CV',
-                'membre'   => 'Ibrahima Fall',
-                'decision' => 'active',
-                'date'     => "Aujourd'hui, 11 h 40",
-            ],
-            [
-                'titre'    => 'Ordinateur portable HP i5',
-                'membre'   => 'Fatou Bâ',
-                'decision' => 'suspendue',
-                'date'     => "Aujourd'hui, 09 h 12",
-            ],
-            [
-                'titre'    => 'Samsung Galaxy S23 Ultra 256 Go',
-                'membre'   => 'Mohamadou',
-                'decision' => 'active',
-                'date'     => 'Hier, 17 h 48',
-            ],
-            [
-                'titre'    => 'Boutique commerciale à vendre',
-                'membre'   => 'yaya',
-                'decision' => 'expirée',
-                'date'     => 'Il y a 2 jours',
-            ],
-        ];
-    }
-
-    /**
-     * Comptes de la plateforme, en LECTURE SEULE (données fictives).
-     *
-     * Le rôle technique est affiché tel quel ('member', 'moderateur',
-     * 'admin') : aucun second référentiel de libellés de rôle n'est créé ici.
-     * App\Core\Auth::label() (étape 5) pourra fournir les libellés français
-     * depuis un point unique si l'affichage le nécessite.
-     *
-     * Colonnes alignées sur la table `users` : prenom, nom, email, role,
-     * status, created_at.
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    private function getUtilisateurs(): array
-    {
-        return [
-            [
-                'nom'      => 'Moussa Ndiaye',
-                'email'    => 'moussa.ndiaye@example.com',
-                'role'     => 'member',
-                'statut'   => 'active',
-                'inscrit'  => '12 mars 2026',
-                'annonces' => 8,
-            ],
-            [
-                'nom'      => 'Awa Sow',
-                'email'    => 'awa.sow@example.com',
-                'role'     => 'member',
-                'statut'   => 'active',
-                'inscrit'  => '3 avril 2026',
-                'annonces' => 5,
-            ],
-            [
-                'nom'      => 'Ibrahima Fall',
-                'email'    => 'ibrahima.fall@example.com',
-                'role'     => 'member',
-                'statut'   => 'suspendu',
-                'inscrit'  => '28 janvier 2026',
-                'annonces' => 14,
-            ],
-            [
-                'nom'      => 'Fatou Bâ',
-                'email'    => 'fatou.ba@example.com',
-                'role'     => 'member',
-                'statut'   => 'active',
-                'inscrit'  => '9 février 2026',
-                'annonces' => 3,
-            ],
-            [
-                'nom'      => 'Ousmane Diallo',
-                'email'    => 'ousmane.diallo@example.com',
-                'role'     => 'moderateur',
-                'statut'   => 'active',
-                'inscrit'  => '15 décembre 2025',
-                'annonces' => 0,
-            ],
-            [
-                'nom'      => 'Aminata Diop',
-                'email'    => 'aminata.diop@example.com',
-                'role'     => 'member',
-                'statut'   => 'banni',
-                'inscrit'  => '30 novembre 2025',
-                'annonces' => 21,
-            ],
-        ];
-    }
-
-    /**
-     * Journal des propres actions de modération (données fictives).
-     *
-     * Colonnes alignées sur la table `audit_logs` : created_at, action,
-     * description, ip_address, target_type.
-     *
-     * @return array<int, array<string, string>>
-     */
-    private function getJournal(): array
-    {
-        return [
-            [
-                'date'   => "Aujourd'hui, 11 h 40",
-                'action' => 'Annonce approuvée',
-                'cible'  => 'Climatiseur split 1,5 CV',
-                'type'   => 'annonce',
-                'ip'     => '196.207.0.12',
-            ],
-            [
-                'date'   => "Aujourd'hui, 10 h 05",
-                'action' => 'Signalement rejeté',
-                'cible'  => 'Ordinateur portable HP i5',
-                'type'   => 'signalement',
-                'ip'     => '196.207.0.12',
-            ],
-            [
-                'date'   => "Aujourd'hui, 09 h 12",
-                'action' => 'Annonce suspendue',
-                'cible'  => 'Ordinateur portable HP i5',
-                'type'   => 'annonce',
-                'ip'     => '196.207.0.12',
-            ],
-            [
-                'date'   => 'Hier, 17 h 48',
-                'action' => 'Signalement traité',
-                'cible'  => 'Climatiseur split 1,5 CV',
-                'type'   => 'signalement',
-                'ip'     => '196.207.0.12',
-            ],
-            [
-                'date'   => 'Hier, 15 h 22',
-                'action' => 'Compte consulté',
-                'cible'  => 'Ibrahima Fall',
-                'type'   => 'utilisateur',
-                'ip'     => '196.207.0.12',
-            ],
-            [
-                'date'   => 'Il y a 2 jours',
-                'action' => 'Annonce approuvée',
-                'cible'  => 'Samsung Galaxy S23 Ultra 256 Go',
-                'type'   => 'annonce',
-                'ip'     => '196.207.0.12',
-            ],
-        ];
-    }
-
-
-
-
 }

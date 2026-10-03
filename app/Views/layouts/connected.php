@@ -13,10 +13,31 @@
  *                           'icone' => string, 'actif' => bool, 'exact' => bool]
  *   $spaceLabel    string  Libellé de l'espace (« Espace Membre »...)
  *   $roleLabel     string  Libellé français du rôle (« Membre », « Modérateur »,
- *                          « Administrateur »). Proviendra de App\Core\Auth::label()
- *                          à l'étape 5 : aucun libellé de rôle n'est dupliqué ici.
- *   $currentUser   array   ['prenom', 'nom', 'email', 'role']
+ *                          « Administrateur »). Surchargé par App\Core\Auth::label()
+ *                          dès que le rôle de la session est connu : un seul
+ *                          référentiel de libellés.
+ *   $currentUser   array   ['prenom', 'nom', 'email', 'role', 'avatar'] — données
+ *                          fournies par le contrôleur. TOUTES sont facultatives :
+ *                          chaque valeur manquante est complétée par le layout
+ *                          lui-même (table `users` via User::trouverParId(), puis
+ *                          session). L'identité vient EXCLUSIVEMENT de la session
+ *                          authentifiée (`user_id`), jamais de l'URL ni du client.
  *   $userLinks     array   Liens du menu utilisateur : ['label', 'href', 'icone']
+ *
+ * ÉTAPE 7.4 — le layout est RÉELLEMENT DYNAMIQUE et partagé par les trois
+ * espaces (member / moderateur / admin), sans duplication :
+ *   - nom complet robuste (prénom seul, nom seul, ou « Utilisateur ») ;
+ *   - libellé de rôle issu de Auth::label() ;
+ *   - avatar si exploitable, sinon initiales (dashAvatar()) ;
+ *   - navigation par rôle : celle du contrôleur si elle est fournie, sinon
+ *     celle déduite du rôle (dashMenuParRole()) ;
+ *   - lien actif calculé par dashIsActive() sur l'URL courante.
+ *
+ * PERFORMANCE : au plus UNE lecture de l'utilisateur connecté par requête HTTP.
+ * La ligne `users` n'est lue que si le contrôleur n'a pas déjà transmis
+ * prénom + nom + email (cas de l'espace Membre, qui met déjà
+ * User::trouverParId() en cache), et la lecture est mémorisée par variable
+ * statique. Aucun N+1.
  *
  * CLOISONNEMENT : ce layout ne contrôle AUCUN rôle et ne décide d'aucun accès.
  * Le rôle technique (« member », « moderateur », « admin ») n'y apparaît que
@@ -33,7 +54,10 @@
  * Aucune donnée utilisateur n'est affichée sans échappement HTML.
  */
 
+use App\Core\Auth;
 use App\Core\Csrf;
+use App\Core\Session;
+use App\Models\User;
 
 // Helpers d'affichage propres aux espaces connectés.
 // (Également chargés en amont par Controller::viewWithLayout(), la vue
@@ -42,7 +66,7 @@ use App\Core\Csrf;
 require_once __DIR__ . '/partials/connected-helpers.php';
 
 // --- Échappement systématique des valeurs affichées ----------------------
-$esc = static fn (mixed $valeur): string => htmlspecialchars((string) $valeur, ENT_QUOTES, 'UTF-8');
+$esc = static fn (mixed $valeur): string => htmlspecialchars((string) $valeur, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 
 // --- Normalisation défensive : aucun warning si une donnée est absente ---
 $content = isset($content) && is_string($content) ? $content : '';
@@ -65,14 +89,137 @@ $menu = isset($menu) && is_array($menu) ? $menu : [];
 $userLinks = isset($userLinks) && is_array($userLinks) ? $userLinks : [];
 $currentUser = isset($currentUser) && is_array($currentUser) ? $currentUser : [];
 
-$userPrenom = isset($currentUser['prenom']) && is_string($currentUser['prenom']) ? trim($currentUser['prenom']) : '';
-$userNom    = isset($currentUser['nom']) && is_string($currentUser['nom']) ? trim($currentUser['nom']) : '';
-$userEmail  = isset($currentUser['email']) && is_string($currentUser['email']) ? trim($currentUser['email']) : '';
-$userRole   = isset($currentUser['role']) && is_string($currentUser['role']) ? trim($currentUser['role']) : '';
+// ===========================================================================
+// ÉTAPE 7.4 — IDENTITÉ RÉELLE DE L'UTILISATEUR CONNECTÉ
+// ===========================================================================
+//
+// SOURCE UNIQUE D'IDENTITÉ : la session authentifiée (`user_id`).
+// Jamais GET, POST, URL ni cookie : le contrôleur qui rend cette page a
+// déjà été validé par AuthMiddleware + RoleMiddleware.
+//
+// 1. Identifiant : session uniquement.
+// 2. Ligne `users` : User::trouverParId(), appelé AU PLUS UNE FOIS par
+//    requête HTTP (mémorisation statique ci-dessous). Le modèle est déjà
+//    mis en cache par MembreController sur l'espace Membre : sur cet espace,
+//    les données fournies par le contrôleur sont donc réutilisées telles
+//    quelles et AUCUNE requête supplémentaire n'est émise.
+// 3. Repli : session (`user_prenom`, `user_role`) si le compte est introuvable.
+// 4. Aucune donnée sensible n'est lue : ni password_hash, ni token, ni statut
+//    d'authentification. Seuls prenom, nom, email, role et avatar sont repris.
 
+$sessionUserId = Session::get('user_id');
+$sessionUserId = is_string($sessionUserId) ? trim($sessionUserId) : '';
+
+/**
+ * Valeur textuelle nettoyée, quelle que soit sa provenance.
+ */
+$texte = static function (mixed $valeur): string {
+    return is_string($valeur) ? trim($valeur) : '';
+};
+
+/**
+ * Ligne `users` de l'utilisateur connecté, récupérée UNE SEULE FOIS par
+ * requête HTTP (variable statique) : aucun N+1, aucun doublon de requête
+ * même si le layout est inclus plusieurs fois.
+ *
+ * @param string $userId UUID issu de la session
+ * @return array<string, mixed>|null
+ */
+$chargerUtilisateur = static function (string $userId): ?array {
+    /** @var array<string, mixed>|null $cache */
+    static $cache = null;
+    static $charge = false;
+
+    if ($charge) {
+        return $cache;
+    }
+
+    $charge = true;
+
+    try {
+        $cache = (new User())->trouverParId($userId);
+    } catch (\Throwable $e) {
+        // Base indisponible : le layout reste affichable (repli session)
+        error_log('Layout connecté : lecture de l\'utilisateur impossible (code ' . $e->getCode() . ').');
+
+        $cache = null;
+    }
+
+    return $cache;
+};
+
+// --- Besoin réel d'une lecture en base ? -----------------------------------
+// Aucune requête n'est émise si le contrôleur a déjà transmis prénom, nom et
+// email : c'est le cas de l'espace Membre, dont le contrôleur met déjà
+// User::trouverParId() en cache. Le layout n'y émet donc AUCUNE requête
+// supplémentaire. Le champ avatar n'est PAS un motif de lecture : il est
+// absent de tous les comptes (aucun envoi d'image n'existe) et sert
+// uniquement de repli via dashAvatar().
+//
+// Au maximum : une seule lecture de l'utilisateur connecté par requête HTTP
+// sur les espaces Modérateur et Administrateur, grâce à la mémorisation
+// statique ci-dessus.
+$besoinBase = $sessionUserId !== '' && (
+    $texte($currentUser['prenom'] ?? null) === ''
+    || $texte($currentUser['nom'] ?? null) === ''
+    || $texte($currentUser['email'] ?? null) === ''
+);
+
+$ligneUtilisateur = $besoinBase ? $chargerUtilisateur($sessionUserId) : null;
+$ligneUtilisateur = is_array($ligneUtilisateur) ? $ligneUtilisateur : [];
+
+// --- Rôle : la session authentifiée fait foi, la base en complément -------
+$userRole = $texte(Session::get('user_role'));
+
+if ($userRole === '') {
+    $userRole = $texte($currentUser['role'] ?? null);
+}
+
+if ($userRole === '') {
+    $userRole = $texte($ligneUtilisateur['role'] ?? null);
+}
+
+// --- Libellé de rôle : référentiel unique App\Core\Auth::label() ----------
+$roleLabelSession = Auth::label($userRole);
+
+if ($roleLabelSession !== '') {
+    $roleLabel = $roleLabelSession;
+}
+
+// --- Prénom / nom / email : contrôleur, puis base, puis session -----------
+$userPrenom = $texte($currentUser['prenom'] ?? null);
+
+if ($userPrenom === '') {
+    $userPrenom = $texte($ligneUtilisateur['prenom'] ?? null);
+}
+
+if ($userPrenom === '') {
+    $userPrenom = $texte(Session::get('user_prenom'));
+}
+
+$userNom = $texte($currentUser['nom'] ?? null);
+
+if ($userNom === '') {
+    $userNom = $texte($ligneUtilisateur['nom'] ?? null);
+}
+
+$userEmail = $texte($currentUser['email'] ?? null);
+
+if ($userEmail === '') {
+    $userEmail = $texte($ligneUtilisateur['email'] ?? null);
+}
+
+// --- Avatar : valeur brute de la base, exploitée par dashAvatar() ----------
+$userAvatar = $currentUser['avatar'] ?? ($ligneUtilisateur['avatar'] ?? null);
+
+// --- Nom complet : jamais d'espace inutile, jamais de valeur vide affichée --
 $userNomComplet = trim($userPrenom . ' ' . $userNom);
 $userNomComplet = $userNomComplet !== '' ? $userNomComplet : 'Utilisateur';
-$userInitiales  = dashInitiales($userPrenom, $userNom);
+
+// --- Navigation : celle du contrôleur, sinon celle du rôle (filet) ---------
+if ($menu === []) {
+    $menu = dashMenuParRole($userRole);
+}
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -243,7 +390,7 @@ $userInitiales  = dashInitiales($userPrenom, $userNom);
                 <?php /* Menu utilisateur : <details> natif → accessible sans JavaScript */ ?>
                 <details class="dash-user-menu" id="dash-user-menu">
                     <summary class="dash-user-btn">
-                        <span class="dash-avatar" aria-hidden="true"><?= $esc($userInitiales) ?></span>
+                        <?= dashAvatar($userAvatar, $userPrenom, $userNom) ?>
                         <span class="dash-user-name"><?= $esc($userNomComplet) ?></span>
                         <?= dashIcon('chevron') ?>
                     </summary>

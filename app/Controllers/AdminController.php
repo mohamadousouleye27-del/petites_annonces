@@ -6,19 +6,40 @@ namespace App\Controllers;
 
 use App\Core\Controller;
 use App\Core\Session;
+use App\Models\Annonce;
+use App\Models\AuditLog;
+use App\Models\Categorie;
+use App\Models\Signalement;
+use App\Models\User;
+use App\Models\Ville;
 
 /**
  * Contrôleur de l'espace Administrateur.
  *
- * PÉRIMÈTRE (étape 4) : interfaces et layout uniquement.
- *   - AUCUNE requête SQL, AUCUN modèle : les données affichées sont
- *     statiques (fictives), comme dans HomeController ;
- *     le branchement sur la base est prévu à l'étape 7 ;
+ * PÉRIMÈTRE (palier 7.3) : LECTURE SEULE sur données MariaDB RÉELLES.
+ *   - les 7 écrans de cet espace sont alimentés par les modèles de lecture
+ *     du palier 7.0 (User, Annonce, Signalement, AuditLog, Categorie,
+ *     Ville) : plus aucune donnée statique ou fictive ;
+ *   - AUCUNE requête SQL ici ni dans les vues : ce contrôleur appelle
+ *     uniquement des méthodes de modèle (une requête par agrégat ou par
+ *     liste, aucun N+1) ;
+ *   - AUCUNE écriture en base, AUCUN formulaire, AUCUN POST : ce palier
+ *     n'implémente aucun CRUD ni aucune action administrative. Les
+ *     boutons d'action éventuellement présents dans les vues sont
+ *     désactivés et ne déclenchent rien ;
  *   - le cloisonnement RBAC n'est PAS géré ici : les routes de cet espace
  *     sont protégées dans config/routes.php par
  *     AuthMiddleware + [RoleMiddleware::class, 'admin'] ;
  *   - le contrôleur ne lit que deux clés de session déjà renseignées à la
  *     connexion (user_prenom, user_role) pour l'affichage de l'identité.
+ *
+ * MODÈLES UTILISÉS (méthodes réellement existantes) :
+ *   User       → compter(), compterParRole(), listerTous()
+ *   Annonce    → compterToutes(), compterParStatut(), listerToutes()
+ *   Signalement→ compterTous(), compterParStatut(), listerTous()
+ *   AuditLog   → compterDepuis(), listerTous()
+ *   Categorie  → compterToutes(), compterParStatut(), listerToutes()
+ *   Ville      → compterToutes(), listerToutes()
  *
  * RESPONSABILITÉS DU RÔLE (colonnes concernées en base) :
  *   - `users` (role, status) → SEUL espace habilité à administrer les rôles
@@ -63,7 +84,34 @@ class AdminController extends Controller
     private const ROLE_LABEL = 'Administrateur';
 
     /**
+     * Nombre maximal d'éléments chargés pour une liste complète.
+     *
+     * Borne de présentation : les modèles appliquent eux-mêmes leur propre
+     * plafond (LIMITE_MAX).
+     *
+     * @var int
+     */
+    private const LIMITE_LISTE = 100;
+
+    /**
+     * Nombre maximal d'éléments d'un référentiel (catégories, villes).
+     *
+     * @var int
+     */
+    private const LIMITE_REFERENTIEL = 200;
+
+    /**
+     * Nombre d'entrées récentes affichées sur le tableau de bord.
+     *
+     * @var int
+     */
+    private const DERNIERES_ENTREES = 5;
+
+    /**
      * Tableau de bord de la plateforme (GET /admin).
+     *
+     * Toutes les statistiques sont des agrégats réels calculés par les
+     * modèles (COUNT) sur MariaDB : aucune valeur n'est codée en dur.
      *
      * @return void
      */
@@ -73,9 +121,10 @@ class AdminController extends Controller
             'Tableau de bord',
             "Vue d'ensemble de la plateforme"
         ) + [
-            'stats'       => $this->getStats(),
-            'repartition' => $this->getRepartitionRoles(),
-            'journal'     => array_slice($this->getJournal(), 0, 5),
+            'stats'        => $this->getStats(),
+            'repartition'  => $this->getRepartitionRoles(),
+            'referentiels' => $this->getReferentiels(),
+            'journal'      => (new AuditLog())->listerTous(self::DERNIERES_ENTREES),
         ];
 
         $this->viewWithLayout('admin/dashboard', $donnees);
@@ -84,17 +133,22 @@ class AdminController extends Controller
     /**
      * Administration des comptes (GET /admin/utilisateurs).
      *
-     * Seul espace habilité à modifier les rôles et les statuts de compte.
+     * Seul espace habilité à administrer les rôles et les statuts de compte,
+     * mais LECTURE SEULE à ce palier : aucune écriture, aucun formulaire,
+     * aucun POST. Le mot de passe n'est jamais sélectionné par le modèle.
      *
      * @return void
      */
     public function utilisateurs(): void
     {
+        $modele = new User();
+
         $donnees = $this->pageData(
             'Utilisateurs',
-            'Rôles, statuts et activité des comptes'
+            'Rôles, statuts et activité des comptes — lecture seule'
         ) + [
-            'utilisateurs' => $this->getUtilisateurs(),
+            'utilisateurs' => $modele->listerTous(self::LIMITE_LISTE),
+            'total'        => $modele->compter(),
             'repartition'  => $this->getRepartitionRoles(),
         ];
 
@@ -108,14 +162,20 @@ class AdminController extends Controller
      */
     public function annonces(): void
     {
-        $annonces = $this->getAnnonces();
+        $modele = new Annonce();
 
         $donnees = $this->pageData(
             'Annonces',
             'Toutes les annonces, tous statuts confondus'
         ) + [
-            'annonces'  => $annonces,
-            'compteurs' => $this->getCompteursAnnonces($annonces),
+            'annonces'  => $modele->listerToutes(self::LIMITE_LISTE),
+            'compteurs' => [
+                'total'      => $modele->compterToutes(),
+                'active'     => $modele->compterParStatut('active'),
+                'en_attente' => $modele->compterParStatut('en_attente'),
+                'expirée'    => $modele->compterParStatut('expirée'),
+                'suspendue'  => $modele->compterParStatut('suspendue'),
+            ],
         ];
 
         $this->viewWithLayout('admin/annonces', $donnees);
@@ -128,14 +188,18 @@ class AdminController extends Controller
      */
     public function categories(): void
     {
-        $categories = $this->getCategories();
+        $modele = new Categorie();
 
         $donnees = $this->pageData(
             'Catégories',
             'Référentiel des catégories et sous-catégories'
         ) + [
-            'categories' => $categories,
-            'compteurs'  => $this->getCompteursReferentiel($categories),
+            'categories' => $modele->listerToutes(self::LIMITE_REFERENTIEL),
+            'compteurs'  => [
+                'total'    => $modele->compterToutes(),
+                'active'   => $modele->compterParStatut('active'),
+                'inactive' => $modele->compterParStatut('inactive'),
+            ],
         ];
 
         $this->viewWithLayout('admin/categories', $donnees);
@@ -148,14 +212,16 @@ class AdminController extends Controller
      */
     public function villes(): void
     {
-        $villes = $this->getVilles();
+        $modele = new Ville();
 
         $donnees = $this->pageData(
             'Villes',
             'Référentiel des régions, départements et communes'
         ) + [
-            'villes'    => $villes,
-            'compteurs' => $this->getCompteursReferentiel($villes),
+            'villes'    => $modele->listerToutes(self::LIMITE_REFERENTIEL),
+            'compteurs' => [
+                'total' => $modele->compterToutes(),
+            ],
         ];
 
         $this->viewWithLayout('admin/villes', $donnees);
@@ -168,21 +234,36 @@ class AdminController extends Controller
      */
     public function signalements(): void
     {
-        $signalements = $this->getSignalements();
+        $modele = new Signalement();
 
         $donnees = $this->pageData(
             'Signalements',
             'Vue globale et traçabilité du traitement'
         ) + [
-            'signalements' => $signalements,
-            'compteurs'    => $this->getCompteursSignalements($signalements),
+            'signalements' => $modele->listerTous(self::LIMITE_LISTE),
+            'compteurs'    => [
+                'total'      => $modele->compterTous(),
+                'en_attente' => $modele->compterParStatut('en_attente'),
+                'traite'     => $modele->compterParStatut('traite'),
+                'rejete'     => $modele->compterParStatut('rejete'),
+            ],
         ];
 
         $this->viewWithLayout('admin/signalements', $donnees);
     }
 
     /**
-     * Journal d'audit complet (GET /admin/journal).
+     * Journal d'audit GLOBAL de la plateforme (GET /admin/journal).
+     *
+     * Contrairement au journal du modérateur (palier 7.2, filtré sur
+     * l'identifiant de session du modérateur), l'administrateur consulte
+     * TOUTES les entrées de `audit_logs`, tous rôles confondus.
+     *
+     * Le schéma réel ne comporte aucune colonne `target_id` : la cible est
+     * décrite par `description` et catégorisée par `target_type`, conformément
+     * au modèle AuditLog. Aucune colonne n'est inventée ici.
+     *
+     * LECTURE SEULE : aucune écriture dans `audit_logs`.
      *
      * @return void
      */
@@ -192,7 +273,7 @@ class AdminController extends Controller
             "Journal d'audit",
             'Historique complet des actions de la plateforme'
         ) + [
-            'journal' => $this->getJournal(),
+            'journal' => (new AuditLog())->listerTous(self::LIMITE_LISTE),
         ];
 
         $this->viewWithLayout('admin/journal', $donnees);
@@ -306,571 +387,89 @@ class AdminController extends Controller
     }
 
     /**
-     * Cartes de statistiques du tableau de bord (données fictives).
+     * Cartes de statistiques du tableau de bord.
      *
-     * Les compteurs « Comptes enregistrés » et « Signalements en attente »
-     * sont dérivés des listes internes afin de rester cohérents ; les
-     * agrégats de plateforme sont des valeurs de démonstration.
+     * Chaque valeur est un agrégat RÉEL calculé par un modèle sur MariaDB
+     * (COUNT ou SUM) : aucune valeur n'est codée en dur, aucune n'est dérivée
+     * d'une liste fictive.
      *
      * @return array<int, array<string, string>>
      */
     private function getStats(): array
     {
-        $signalementsEnAttente = 0;
-
-        foreach ($this->getSignalements() as $signalement) {
-            if (($signalement['statut'] ?? '') === 'en_attente') {
-                $signalementsEnAttente++;
-            }
-        }
+        $user = new User();
+        $annonce = new Annonce();
+        $signalement = new Signalement();
 
         return [
             [
                 'icone'  => 'utilisateurs',
-                'valeur' => (string) count($this->getUtilisateurs()),
+                'valeur' => number_format($user->compter(), 0, ',', ' '),
                 'label'  => 'Comptes enregistrés',
             ],
             [
                 'icone'  => 'annonces',
-                'valeur' => '14 618',
+                'valeur' => number_format($annonce->compterToutes(), 0, ',', ' '),
                 'label'  => 'Annonces publiées',
             ],
             [
                 'icone'  => 'signalements',
-                'valeur' => (string) $signalementsEnAttente,
+                'valeur' => number_format($signalement->compterParStatut('en_attente'), 0, ',', ' '),
                 'label'  => 'Signalements en attente',
             ],
             [
                 'icone'  => 'journal',
-                'valeur' => '128',
+                'valeur' => number_format(
+                    (new AuditLog())->compterDepuis(date('Y-m-d 00:00:00')),
+                    0,
+                    ',',
+                    ' '
+                ),
                 'label'  => "Actions aujourd'hui",
             ],
         ];
     }
 
     /**
-     * Répartition des comptes par rôle, dérivée de la liste des utilisateurs.
+     * Compteurs des deux référentiels de la plateforme.
      *
-     * Les clés sont les valeurs exactes de l'ENUM `users.role` :
-     * 'member', 'moderateur', 'admin'. Aucune autre valeur n'est inventée.
+     * `categories` et `villes` sont les deux seules tables de référentiel
+     * réellement présentes dans le modèle de données.
+     *
+     * @return array<string, int>
+     */
+    private function getReferentiels(): array
+    {
+        return [
+            'categories'        => (new Categorie())->compterToutes(),
+            'categories_active' => (new Categorie())->compterParStatut('active'),
+            'villes'            => (new Ville())->compterToutes(),
+        ];
+    }
+
+    /**
+     * Répartition des comptes par rôle (valeurs réelles de l'ENUM `users.role`).
+     *
+     * Les trois rôles sont les SEULES valeurs possibles de l'énumération :
+     * 'member', 'moderateur', 'admin'. Aucune autre valeur n'est inventée et
+     * aucun rôle supplémentaire n'est supposé.
      *
      * @return array<int, array{role: string, total: int}>
      */
     private function getRepartitionRoles(): array
     {
-        $compteurs = [
-            'member'     => 0,
-            'moderateur' => 0,
-            'admin'      => 0,
-        ];
-
-        foreach ($this->getUtilisateurs() as $utilisateur) {
-            $role = $utilisateur['role'] ?? null;
-
-            if (is_string($role) && array_key_exists($role, $compteurs)) {
-                $compteurs[$role]++;
-            }
-        }
+        $modele = new User();
 
         $repartition = [];
 
-        foreach ($compteurs as $role => $total) {
+        foreach (['member', 'moderateur', 'admin'] as $role) {
             $repartition[] = [
                 'role'  => $role,
-                'total' => $total,
+                'total' => $modele->compterParRole($role),
             ];
         }
 
         return $repartition;
     }
-
-    /**
-     * Compteurs par statut d'un référentiel (catégories, villes...).
-     *
-     * Un référentiel dépourvu de colonne `statut` (cas des villes) ne
-     * renseigne que le total : les autres compteurs restent à zéro.
-     *
-     * @param array<int, array<string, mixed>> $referentiel Lignes du référentiel
-     * @return array<string, int> Nombre de lignes par statut
-     */
-    private function getCompteursReferentiel(array $referentiel): array
-    {
-        $compteurs = [
-            'total'    => count($referentiel),
-            'active'   => 0,
-            'inactive' => 0,
-        ];
-
-        foreach ($referentiel as $ligne) {
-            $statut = $ligne['statut'] ?? null;
-
-            if (is_string($statut) && array_key_exists($statut, $compteurs)) {
-                $compteurs[$statut]++;
-            }
-        }
-
-        return $compteurs;
-    }
-
-    /**
-     * Compteurs par statut, dérivés de la liste des annonces.
-     *
-     * Les clés correspondent à l'ENUM `annonces.status` :
-     * 'active', 'en_attente', 'expirée', 'suspendue'.
-     *
-     * @param array<int, array<string, mixed>> $annonces Annonces
-     * @return array<string, int> Nombre d'annonces par statut
-     */
-    private function getCompteursAnnonces(array $annonces): array
-    {
-        $compteurs = [
-            'total'      => count($annonces),
-            'active'     => 0,
-            'en_attente' => 0,
-            'expirée'    => 0,
-            'suspendue'  => 0,
-        ];
-
-        foreach ($annonces as $annonce) {
-            $statut = $annonce['statut'] ?? null;
-
-            if (is_string($statut) && array_key_exists($statut, $compteurs)) {
-                $compteurs[$statut]++;
-            }
-        }
-
-        return $compteurs;
-    }
-
-    /**
-     * Compteurs par statut, dérivés de la liste des signalements.
-     *
-     * Les clés correspondent à l'ENUM `signalements.status` :
-     * 'en_attente', 'traite', 'rejete'.
-     *
-     * @param array<int, array<string, mixed>> $signalements Signalements
-     * @return array<string, int> Nombre de signalements par statut
-     */
-    private function getCompteursSignalements(array $signalements): array
-    {
-        $compteurs = [
-            'total'      => count($signalements),
-            'en_attente' => 0,
-            'traite'     => 0,
-            'rejete'     => 0,
-        ];
-
-        foreach ($signalements as $signalement) {
-            $statut = $signalement['statut'] ?? null;
-
-            if (is_string($statut) && array_key_exists($statut, $compteurs)) {
-                $compteurs[$statut]++;
-            }
-        }
-
-        return $compteurs;
-    }
-
-    /**
-     * Comptes de la plateforme (données fictives).
-     *
-     * Colonnes alignées sur la table `users` : prenom, nom, email, role,
-     * status, created_at. Le rôle est affiché tel quel ('member',
-     * 'moderateur', 'admin') : aucun second référentiel de libellés.
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    private function getUtilisateurs(): array
-    {
-        return [
-            [
-                'nom'      => 'Souleymane Manga',
-                'email'    => 'souleymane.manga@example.com',
-                'role'     => 'admin',
-                'statut'   => 'active',
-                'inscrit'  => '18 octobre 2025',
-                'annonces' => 0,
-            ],
-            [
-                'nom'      => 'moussa',
-                'email'    => 'moussa@example.com',
-                'role'     => 'moderateur',
-                'statut'   => 'active',
-                'inscrit'  => '15 décembre 2025',
-                'annonces' => 0,
-            ],
-            [
-                'nom'      => 'yaya',
-                'email'    => 'yaya@example.com',
-                'role'     => 'member',
-                'statut'   => 'active',
-                'inscrit'  => '12 mars 2026',
-                'annonces' => 8,
-            ],
-            [
-                'nom'      => 'Mohamadou',
-                'email'    => 'mohamadou@example.com',
-                'role'     => 'member',
-                'statut'   => 'active',
-                'inscrit'  => '3 avril 2026',
-                'annonces' => 5,
-            ],
-            [
-                'nom'      => 'Fatou Bâ',
-                'email'    => 'fatou.ba@example.com',
-                'role'     => 'member',
-                'statut'   => 'active',
-                'inscrit'  => '9 février 2026',
-                'annonces' => 3,
-            ],
-            [
-                'nom'      => 'Awa Sow',
-                'email'    => 'awa.sow@example.com',
-                'role'     => 'member',
-                'statut'   => 'suspendu',
-                'inscrit'  => '28 janvier 2026',
-                'annonces' => 14,
-            ],
-            [
-                'nom'      => 'Ibrahima Fall',
-                'email'    => 'ibrahima.fall@example.com',
-                'role'     => 'member',
-                'statut'   => 'banni',
-                'inscrit'  => '30 novembre 2025',
-                'annonces' => 21,
-            ],
-        ];
-    }
-
-    /**
-     * Toutes les annonces de la plateforme (données fictives).
-     *
-     * Colonnes alignées sur la table `annonces` : titre, user_id (membre),
-     * categorie_id, ville_id, prix, type_annonce, status, nb_vues,
-     * created_at.
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    private function getAnnonces(): array
-    {
-        return [
-            [
-                'titre'     => 'Appartement 3 pièces à Almadies',
-                'membre'    => 'yaya',
-                'categorie' => 'Immobilier',
-                'ville'     => 'Dakar',
-                'prix'      => 250000,
-                'suffixe'   => '/mois',
-                'statut'    => 'active',
-                'vues'      => 1240,
-                'date'      => 'Il y a 2 heures',
-            ],
-            [
-                'titre'     => 'Toyota RAV4 2019 — Très bon état',
-                'membre'    => 'Mohamadou',
-                'categorie' => 'Véhicules',
-                'ville'     => 'Dakar',
-                'prix'      => 18500000,
-                'suffixe'   => '',
-                'statut'    => 'active',
-                'vues'      => 980,
-                'date'      => 'Il y a 5 heures',
-            ],
-            [
-                'titre'     => 'Samsung Galaxy S23 Ultra 256 Go',
-                'membre'    => 'Mohamadou',
-                'categorie' => 'Téléphones',
-                'ville'     => 'Dakar',
-                'prix'      => 850000,
-                'suffixe'   => '',
-                'statut'    => 'en_attente',
-                'vues'      => 143,
-                'date'      => 'Il y a 6 heures',
-            ],
-            [
-                'titre'     => 'MacBook Pro 14" M1 Pro',
-                'membre'    => 'Fatou Bâ',
-                'categorie' => 'Électronique',
-                'ville'     => 'Dakar',
-                'prix'      => 1250000,
-                'suffixe'   => '',
-                'statut'    => 'active',
-                'vues'      => 1870,
-                'date'      => 'Hier',
-            ],
-            [
-                'titre'     => 'Chambre meublée à louer — Liberté 6',
-                'membre'    => 'Awa Sow',
-                'categorie' => 'Immobilier',
-                'ville'     => 'Dakar',
-                'prix'      => 75000,
-                'suffixe'   => '/mois',
-                'statut'    => 'expirée',
-                'vues'      => 890,
-                'date'      => 'Il y a 3 jours',
-            ],
-            [
-                'titre'     => 'Terrain 300 m² à Diamniadio',
-                'membre'    => 'Mohamadou',
-                'categorie' => 'Immobilier',
-                'ville'     => 'Rufisque',
-                'prix'      => 24000000,
-                'suffixe'   => '',
-                'statut'    => 'en_attente',
-                'vues'      => 210,
-                'date'      => 'Il y a 3 jours',
-            ],
-            [
-                'titre'     => 'Scooter électrique neuf',
-                'membre'    => 'Awa Sow',
-                'categorie' => 'Véhicules',
-                'ville'     => 'Thiès',
-                'prix'      => 650000,
-                'suffixe'   => '',
-                'statut'    => 'suspendue',
-                'vues'      => 312,
-                'date'      => 'Il y a 4 jours',
-            ],
-            [
-                'titre'     => 'Cours particuliers de mathématiques',
-                'membre'    => 'Fatou Bâ',
-                'categorie' => 'Emploi & Services',
-                'ville'     => 'Saint-Louis',
-                'prix'      => 15000,
-                'suffixe'   => '/heure',
-                'statut'    => 'active',
-                'vues'      => 468,
-                'date'      => 'Il y a 5 jours',
-            ],
-        ];
-    }
-
-    /**
-     * Référentiel des catégories (données fictives).
-     *
-     * Colonnes alignées sur la table `categories` : nom, parent_id, status.
-     * `parent` vaut null pour une catégorie racine (parent_id NULL) et le nom
-     * de la catégorie mère pour une sous-catégorie.
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    private function getCategories(): array
-    {
-        return [
-            ['nom' => 'Immobilier',        'parent' => null,           'statut' => 'active',   'annonces' => 3240],
-            ['nom' => 'Véhicules',         'parent' => null,           'statut' => 'active',   'annonces' => 2875],
-            ['nom' => 'Électronique',      'parent' => null,           'statut' => 'active',   'annonces' => 1980],
-            ['nom' => 'Téléphones',        'parent' => 'Électronique', 'statut' => 'active',   'annonces' => 1642],
-            ['nom' => 'Mode',              'parent' => null,           'statut' => 'active',   'annonces' => 1250],
-            ['nom' => 'Maison',            'parent' => null,           'statut' => 'active',   'annonces' => 980],
-            ['nom' => 'Emploi & Services', 'parent' => null,           'statut' => 'active',   'annonces' => 1120],
-            ['nom' => 'Loisirs',           'parent' => null,           'statut' => 'active',   'annonces' => 760],
-            ['nom' => 'Autres',            'parent' => null,           'statut' => 'inactive', 'annonces' => 771],
-        ];
-    }
-
-    /**
-     * Référentiel des villes (données fictives).
-     *
-     * Colonnes alignées sur la table `villes` : nom, type, parent_id.
-     * `parent` vaut null pour une région (parent_id NULL) et le nom de la
-     * région pour un département ou une commune. La table `villes` ne possède
-     * pas de colonne `statut` : aucun badge de statut n'est donc affiché.
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    private function getVilles(): array
-    {
-        return [
-            ['nom' => 'Dakar',        'type' => 'region',      'parent' => null,    'annonces' => 5820],
-            ['nom' => 'Pikine',       'type' => 'departement', 'parent' => 'Dakar', 'annonces' => 980],
-            ['nom' => 'Guédiawaye',   'type' => 'departement', 'parent' => 'Dakar', 'annonces' => 640],
-            ['nom' => 'Rufisque',     'type' => 'departement', 'parent' => 'Dakar', 'annonces' => 510],
-            ['nom' => 'Thiès',        'type' => 'region',      'parent' => null,    'annonces' => 1420],
-            ['nom' => 'Saint-Louis',  'type' => 'region',      'parent' => null,    'annonces' => 860],
-            ['nom' => 'Diourbel',     'type' => 'region',      'parent' => null,    'annonces' => 540],
-            ['nom' => 'Ziguinchor',   'type' => 'region',      'parent' => null,    'annonces' => 320],
-        ];
-    }
-
-    /**
-     * Vue globale des signalements, avec traçabilité (données fictives).
-     *
-     * Colonnes alignées sur la table `signalements` : annonce_id, user_id
-     * (signaleur), raison, status, created_at, resolved_at, resolved_by.
-     * Les statuts reprennent l'ENUM de la base : 'en_attente', 'traite',
-     * 'rejete'. Les signalements non traités n'ont ni auteur de résolution
-     * ni date de résolution (champs vides).
-     *
-     * @return array<int, array<string, string>>
-     */
-    private function getSignalements(): array
-    {
-        return [
-            [
-                'annonce'     => 'iPhone 14 Pro — 128 Go',
-                'raison'      => 'Prix trompeur',
-                'signale_par' => 'Awa Sow',
-                'auteur'      => 'yaya',
-                'date'        => 'Il y a 20 minutes',
-                'statut'      => 'en_attente',
-                'traite_par'  => '',
-                'resolu_le'   => '',
-            ],
-            [
-                'annonce'     => 'Terrain 300 m² à Diamniadio',
-                'raison'      => 'Annonce en doublon',
-                'signale_par' => 'Ibrahima Fall',
-                'auteur'      => 'Mohamadou',
-                'date'        => 'Il y a 1 heure',
-                'statut'      => 'en_attente',
-                'traite_par'  => '',
-                'resolu_le'   => '',
-            ],
-            [
-                'annonce'     => 'Scooter électrique neuf',
-                'raison'      => 'Contenu inapproprié',
-                'signale_par' => 'Fatou Bâ',
-                'auteur'      => 'Awa Sow',
-                'date'        => 'Il y a 3 heures',
-                'statut'      => 'en_attente',
-                'traite_par'  => '',
-                'resolu_le'   => '',
-            ],
-            [
-                'annonce'     => 'Machine à coudre industrielle',
-                'raison'      => 'Vendeur injoignable',
-                'signale_par' => 'Aminata Diop',
-                'auteur'      => 'Awa Sow',
-                'date'        => 'Hier',
-                'statut'      => 'en_attente',
-                'traite_par'  => '',
-                'resolu_le'   => '',
-            ],
-            [
-                'annonce'     => 'Climatiseur split 1,5 CV',
-                'raison'      => 'Prix trompeur',
-                'signale_par' => 'Moussa Ndiaye',
-                'auteur'      => 'Ibrahima Fall',
-                'date'        => 'Hier',
-                'statut'      => 'traite',
-                'traite_par'  => 'moussa',
-                'resolu_le'   => "Aujourd'hui, 11 h 40",
-            ],
-            [
-                'annonce'     => 'Ordinateur portable HP i5',
-                'raison'      => 'Annonce en doublon',
-                'signale_par' => 'Ousmane Diallo',
-                'auteur'      => 'Fatou Bâ',
-                'date'        => 'Il y a 2 jours',
-                'statut'      => 'traite',
-                'traite_par'  => 'moussa',
-                'resolu_le'   => "Aujourd'hui, 10 h 05",
-            ],
-            [
-                'annonce'     => 'Cours particuliers de mathématiques',
-                'raison'      => 'Contenu inapproprié',
-                'signale_par' => 'yaya',
-                'auteur'      => 'Fatou Bâ',
-                'date'        => 'Il y a 2 jours',
-                'statut'      => 'rejete',
-                'traite_par'  => 'moussa',
-                'resolu_le'   => 'Hier, 17 h 48',
-            ],
-        ];
-    }
-
-    /**
-     * Journal d'audit complet de la plateforme (données fictives).
-     *
-     * Colonnes alignées sur la table `audit_logs` : created_at, user_id,
-     * action, description, ip_address, target_type.
-     *
-     * @return array<int, array<string, string>>
-     */
-    private function getJournal(): array
-    {
-        return [
-            [
-                'date'        => "Aujourd'hui, 11 h 40",
-                'utilisateur' => 'moussa',
-                'role'        => 'moderateur',
-                'action'      => 'Annonce approuvée',
-                'cible'       => 'Climatiseur split 1,5 CV',
-                'type'        => 'annonce',
-                'ip'          => '196.207.0.12',
-            ],
-            [
-                'date'        => "Aujourd'hui, 10 h 05",
-                'utilisateur' => 'moussa',
-                'role'        => 'moderateur',
-                'action'      => 'Signalement rejeté',
-                'cible'       => 'Ordinateur portable HP i5',
-                'type'        => 'signalement',
-                'ip'          => '196.207.0.12',
-            ],
-            [
-                'date'        => "Aujourd'hui, 09 h 12",
-                'utilisateur' => 'moussa',
-                'role'        => 'moderateur',
-                'action'      => 'Annonce suspendue',
-                'cible'       => 'Ordinateur portable HP i5',
-                'type'        => 'annonce',
-                'ip'          => '196.207.0.12',
-            ],
-            [
-                'date'        => "Aujourd'hui, 08 h 30",
-                'utilisateur' => 'Souleymane Manga',
-                'role'        => 'admin',
-                'action'      => 'Rôle modifié',
-                'cible'       => 'Ousmane Diallo',
-                'type'        => 'utilisateur',
-                'ip'          => '196.207.0.45',
-            ],
-            [
-                'date'        => 'Hier, 17 h 48',
-                'utilisateur' => 'moussa',
-                'role'        => 'moderateur',
-                'action'      => 'Signalement traité',
-                'cible'       => 'Climatiseur split 1,5 CV',
-                'type'        => 'signalement',
-                'ip'          => '196.207.0.12',
-            ],
-            [
-                'date'        => 'Hier, 16 h 10',
-                'utilisateur' => 'Souleymane Manga',
-                'role'        => 'admin',
-                'action'      => 'Catégorie renommée',
-                'cible'       => 'Électronique',
-                'type'        => 'categorie',
-                'ip'          => '196.207.0.45',
-            ],
-            [
-                'date'        => 'Hier, 15 h 22',
-                'utilisateur' => 'moussa',
-                'role'        => 'moderateur',
-                'action'      => 'Compte consulté',
-                'cible'       => 'Ibrahima Fall',
-                'type'        => 'utilisateur',
-                'ip'          => '196.207.0.12',
-            ],
-            [
-                'date'        => 'Il y a 2 jours',
-                'utilisateur' => 'Souleymane Manga',
-                'role'        => 'admin',
-                'action'      => 'Compte suspendu',
-                'cible'       => 'Awa Sow',
-                'type'        => 'utilisateur',
-                'ip'          => '196.207.0.45',
-            ],
-        ];
-    }
-
-
-
-
-
-
-
 
 }

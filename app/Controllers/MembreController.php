@@ -6,26 +6,35 @@ namespace App\Controllers;
 
 use App\Core\Controller;
 use App\Core\Session;
+use App\Models\Annonce;
+use App\Models\Favori;
+use App\Models\Message;
+use App\Models\User;
 
 /**
- * Contrôleur de l'espace Membre.
+ * Contrôleur de l'espace Membre — PALIER 7.1 (LECTURE SEULE).
  *
- * PÉRIMÈTRE (étape 2) : interfaces et layout uniquement.
- *   - AUCUNE requête SQL, AUCUN modèle : les données affichées sont
- *     statiques (fictives), exactement comme dans HomeController ;
- *     le branchement sur la base est prévu à l'étape 7 ;
- *   - le cloisonnement RBAC n'est PAS géré ici : les routes de cet espace
- *     sont protégées dans config/routes.php par
- *     AuthMiddleware + [RoleMiddleware::class, 'member'] ;
- *   - le contrôleur ne lit que deux clés de session déjà renseignées à la
- *     connexion (user_prenom, user_role) pour l'affichage de l'identité.
+ * Les 5 écrans de l'espace Membre sont alimentés par les données RÉELLES de
+ * la base MariaDB, via les modèles de lecture du palier 7.0 :
  *
- * Routes associées :
- *   GET /membre          → dashboard()
- *   GET /membre/annonces → annonces()
- *   GET /membre/favoris  → favoris()
- *   GET /membre/messages → messages()
- *   GET /membre/profil   → profil()
+ *   GET /membre          → dashboard()   Annonce, Favori, Message
+ *   GET /membre/annonces → annonces()    Annonce
+ *   GET /membre/favoris  → favoris()     Favori
+ *   GET /membre/messages → messages()    Message
+ *   GET /membre/profil   → profil()      User, Message
+ *
+ * RÈGLES RESPECTÉES
+ *   - AUCUNE requête SQL ici ni dans les vues : tout passe par les méthodes
+ *     préparées des modèles (1 appel = 1 requête, pas de N+1) ;
+ *   - AUCUN CRUD : ce palier est strictement en lecture ; les écritures
+ *     (publier, modifier, retirer un favori, envoyer un message...) seront
+ *     traitées dans un palier ultérieur ;
+ *   - CLOISONNEMENT : le propriétaire des données est TOUJOURS l'utilisateur
+ *     authentifié (clé de session `user_id`). Aucun identifiant fourni par
+ *     l'URL n'est utilisé pour déterminer le propriétaire ;
+ *   - le contrôle d'accès (rôles) reste assuré par les middlewares déclarés
+ *     dans config/routes.php (AuthMiddleware + RoleMiddleware). Ce
+ *     contrôleur ne prend aucune décision d'autorisation.
  *
  * @package App\Controllers
  */
@@ -41,115 +50,259 @@ class MembreController extends Controller
     /**
      * Libellé français du rôle affiché dans la topbar.
      *
-     * Volontairement constant : l'espace est réservé au rôle « member »
-     * par RoleMiddleware, il ne peut donc afficher que ce rôle.
-     * App\Core\Auth::label() (étape 5) centralisera les libellés pour la
-     * redirection après connexion.
-     *
      * @var string
      */
     private const ROLE_LABEL = 'Membre';
 
     /**
+     * Nombre de dernières annonces affichées sur le tableau de bord.
+     *
+     * @var int
+     */
+    private const DERNIERES_ANNONCES = 4;
+
+    /**
+     * Nombre de conversations récentes affichées sur le tableau de bord.
+     *
+     * @var int
+     */
+    private const DERNIERES_CONVERSATIONS = 3;
+
+    /**
+     * Nombre maximal d'éléments chargés pour une liste complète.
+     *
+     * Borne de présentation uniquement : les modèles appliquent eux-mêmes
+     * leur propre plafond (LIMITE_MAX).
+     *
+     * @var int
+     */
+    private const LIMITE_LISTE = 100;
+
+    /**
+     * L'utilisateur connecté a-t-il déjà été chargé depuis la base ?
+     *
+     * Évite une seconde requête identique au cours de la même page.
+     *
+     * @var bool
+     */
+    private bool $membreCharge = false;
+
+    /**
+     * Ligne `users` de l'utilisateur connecté (null s'il est introuvable).
+     *
+     * @var array<string, mixed>|null
+     */
+    private ?array $membre = null;
+
+    /**
      * Tableau de bord du membre (GET /membre).
+     *
+     * Toutes les données sont calculées pour l'utilisateur CONNECTÉ :
+     * statistiques d'annonces (1 requête agrégée), dernières annonces,
+     * conversations récentes, compteurs de messages non lus et de favoris.
      *
      * @return void
      */
     public function dashboard(): void
     {
+        $userId = $this->utilisateurId();
+
+        $modeleAnnonce = new Annonce();
+        $modeleMessage = new Message();
+
+        $statistiques = $userId !== null
+            ? $modeleAnnonce->statistiquesMembre($userId)
+            : $this->statistiquesVides();
+
+        $annonces = $userId !== null
+            ? $modeleAnnonce->listerParMembre($userId, self::DERNIERES_ANNONCES)
+            : [];
+
+        $conversations = $userId !== null
+            ? $modeleMessage->listerConversations($userId, self::DERNIERES_CONVERSATIONS)
+            : [];
+
+        $nonLus  = $userId !== null ? $modeleMessage->compterNonLus($userId) : 0;
+        $favoris = $userId !== null ? (new Favori())->compterPourMembre($userId) : 0;
+
         $donnees = $this->pageData(
             'Tableau de bord',
             "Vue d'ensemble de votre activité sur PetitesAnnonces.sn"
         ) + [
-            'stats'    => $this->getStats(),
-            'annonces' => array_slice($this->getAnnonces(), 0, 4),
-            'messages' => array_slice($this->getMessages(), 0, 3),
+            'stats' => [
+                [
+                    'icone'  => 'annonces',
+                    'valeur' => number_format($statistiques['actives'], 0, ',', ' '),
+                    'label'  => 'Annonces actives',
+                ],
+                [
+                    'icone'  => 'oeil',
+                    'valeur' => number_format($statistiques['vues'], 0, ',', ' '),
+                    'label'  => 'Vues cumulées',
+                ],
+                [
+                    'icone'  => 'messages',
+                    'valeur' => number_format($nonLus, 0, ',', ' '),
+                    'label'  => 'Messages non lus',
+                ],
+                [
+                    'icone'  => 'favoris',
+                    'valeur' => number_format($favoris, 0, ',', ' '),
+                    'label'  => 'Annonces en favori',
+                ],
+            ],
+            'annonces'      => $annonces,
+            'conversations' => $conversations,
+            'nonLus'        => $nonLus,
         ];
 
         $this->viewWithLayout('membre/dashboard', $donnees);
     }
 
     /**
-     * Liste des annonces du membre (GET /membre/annonces).
+     * Liste des annonces du membre connecté (GET /membre/annonces).
      *
      * @return void
      */
     public function annonces(): void
     {
-        $annonces = $this->getAnnonces();
+        $userId = $this->utilisateurId();
+        $modele = new Annonce();
+
+        $annonces = $userId !== null
+            ? $modele->listerParMembre($userId, self::LIMITE_LISTE)
+            : [];
+
+        $compteurs = $userId !== null
+            ? $modele->statistiquesMembre($userId)
+            : $this->statistiquesVides();
 
         $donnees = $this->pageData(
             'Mes annonces',
             "Suivez l'état de publication de vos annonces"
         ) + [
             'annonces'  => $annonces,
-            'compteurs' => $this->getCompteursAnnonces($annonces),
+            'compteurs' => $compteurs,
         ];
 
         $this->viewWithLayout('membre/annonces', $donnees);
     }
 
     /**
-     * Annonces enregistrées en favori (GET /membre/favoris).
+     * Annonces enregistrées en favori par le membre connecté
+     * (GET /membre/favoris).
      *
      * @return void
      */
     public function favoris(): void
     {
+        $userId = $this->utilisateurId();
+        $modele = new Favori();
+
+        $favoris = $userId !== null
+            ? $modele->listerPourMembre($userId, self::LIMITE_LISTE)
+            : [];
+
+        $total = $userId !== null ? $modele->compterPourMembre($userId) : 0;
+
         $donnees = $this->pageData(
             'Mes favoris',
             'Les annonces que vous avez enregistrées'
         ) + [
-            'favoris' => $this->getFavoris(),
+            'favoris' => $favoris,
+            'total'   => $total,
         ];
 
         $this->viewWithLayout('membre/favoris', $donnees);
     }
 
     /**
-     * Messagerie du membre (GET /membre/messages).
+     * Messagerie du membre connecté (GET /membre/messages).
+     *
+     * LECTURE SEULE : la conversation affichée dans le volet de lecture est
+     * choisie par les paramètres d'URL `annonce` et `interlocuteur`, mais
+     * UNIQUEMENT si ce couple correspond à une conversation réelle du membre
+     * (retournée par listerConversations()). Un identifiant inconnu ou
+     * appartenant à un autre membre retombe sur la conversation la plus
+     * récente. Aucun de ces paramètres ne sert à déterminer la propriété des
+     * données : celle-ci reste fixée par `user_id` de session.
      *
      * @return void
      */
     public function messages(): void
     {
-        $conversations = $this->getMessages();
+        $userId = $this->utilisateurId();
+        $modele = new Message();
 
-        $nonLus = 0;
+        $conversations = $userId !== null
+            ? $modele->listerConversations($userId)
+            : [];
 
-        foreach ($conversations as $conversation) {
-            if (($conversation['non_lu'] ?? false) === true) {
-                $nonLus++;
-            }
-        }
+        $nonLus = $userId !== null ? $modele->compterNonLus($userId) : 0;
+
+        $conversation = $this->conversationOuverte($conversations);
+
+        $lignes = ($userId !== null && $conversation !== null)
+            ? $modele->listerFil(
+                $userId,
+                (string) $conversation['annonces_id'],
+                (string) $conversation['interlocuteur_id']
+            )
+            : [];
 
         $donnees = $this->pageData(
             'Mes messages',
             'Vos échanges avec les autres membres'
         ) + [
-            'conversations' => $conversations,
-            'nonLus'        => $nonLus,
-            'fil'           => $this->getFilConversation(),
+            'conversations'       => $conversations,
+            'nonLus'              => $nonLus,
+            'fil'                 => $this->construireFil($lignes, $userId, $conversation),
+            'conversationOuverte' => $conversation,
         ];
 
         $this->viewWithLayout('membre/messages', $donnees);
     }
 
     /**
-     * Profil du membre (GET /membre/profil).
+     * Profil du membre connecté (GET /membre/profil).
+     *
+     * Les informations proviennent de la table `users` (User::trouverParId),
+     * y compris ville et compteurs. Les valeurs absentes (NULL en base) sont
+     * transmises brutes : la vue les remplace par « — ». LECTURE SEULE :
+     * aucune modification de profil n'est proposée.
      *
      * @return void
      */
     public function profil(): void
     {
-        $utilisateur = $this->utilisateurCourant();
+        $userId = $this->utilisateurId();
+        $utilisateur = $this->membre() ?? [];
+
+        $profil = [
+            'prenom'     => $this->texte($utilisateur['prenom'] ?? null),
+            'nom'        => $this->texte($utilisateur['nom'] ?? null),
+            'email'      => $this->texte($utilisateur['email'] ?? null),
+            'telephone'  => $utilisateur['telephone'] ?? null,
+            'ville'      => $utilisateur['ville_nom'] ?? null,
+            'created_at' => $utilisateur['created_at'] ?? null,
+            'statut'     => $this->texte($utilisateur['status'] ?? null),
+        ];
+
+        $activite = [
+            ['label' => 'Annonces publiées',  'valeur' => (int) ($utilisateur['nb_annonces'] ?? 0)],
+            ['label' => 'Annonces en favori', 'valeur' => (int) ($utilisateur['nb_favoris'] ?? 0)],
+            [
+                'label'  => 'Messages échangés',
+                'valeur' => $userId !== null ? (new Message())->compterEchanges($userId) : 0,
+            ],
+        ];
 
         $donnees = $this->pageData(
             'Mon profil',
-            'Vos informations personnelles'
+            'Vos informations personnelles et votre activité'
         ) + [
-            'profil'   => $this->getProfil($utilisateur),
-            'activite' => $this->getActiviteProfil(),
+            'profil'   => $profil,
+            'activite' => $activite,
         ];
 
         $this->viewWithLayout('membre/profil', $donnees);
@@ -176,26 +329,33 @@ class MembreController extends Controller
     }
 
     /**
-     * Identité de l'utilisateur connecté, pour l'affichage uniquement.
+     * Identité de l'utilisateur connecté, pour l'affichage (topbar).
      *
-     * Seules deux clés de session sont lues : `user_prenom` et `user_role`,
-     * renseignées à la connexion par AuthController à partir de la table
-     * `users`. Aucune requête SQL n'est exécutée ; le nom et l'email seront
-     * chargés depuis la base à l'étape 7.
-     *
-     * Aucune décision d'accès n'est prise à partir de ces valeurs : le rôle
-     * technique n'est ici qu'une donnée affichée (attribut data-role).
+     * Le prénom, le nom et l'email proviennent de la table `users`
+     * (User::trouverParId, une seule requête mise en cache). Le rôle
+     * technique provient de la session. Aucune décision d'accès n'est prise
+     * ici : le rôle n'est qu'une donnée affichée.
      *
      * @return array{prenom: string, nom: string, email: string, role: string}
      */
     private function utilisateurCourant(): array
     {
-        $prenom = Session::get('user_prenom');
+        $utilisateur = $this->membre() ?? [];
+
+        $prenom = $this->texte($utilisateur['prenom'] ?? null);
+        $nom    = $this->texte($utilisateur['nom'] ?? null);
+        $email  = $this->texte($utilisateur['email'] ?? null);
+
+        // Repli sur la session si la ligne n'a pas pu être chargée
+        if ($prenom === '') {
+            $sessionPrenom = Session::get('user_prenom');
+            $prenom = is_string($sessionPrenom) ? trim($sessionPrenom) : '';
+        }
 
         return [
-            'prenom' => is_string($prenom) ? trim($prenom) : '',
-            'nom'    => '',
-            'email'  => '',
+            'prenom' => $prenom,
+            'nom'    => $nom,
+            'email'  => $email,
             'role'   => $this->currentRole(),
         ];
     }
@@ -203,9 +363,9 @@ class MembreController extends Controller
     /**
      * Entrées de la navigation principale de l'espace Membre.
      *
-     * Les URL sont construites avec base_path() et l'état actif est déduit
-     * de l'URL courante par le layout (dashIsActive()). L'entrée du tableau
-     * de bord porte `exact` pour ne pas rester active sur les sous-pages.
+     * Les URL sont construites avec base_path() ; l'état actif est déduit de
+     * l'URL courante par le layout (dashIsActive()). L'entrée du tableau de
+     * bord porte `exact` pour ne pas rester active sur les sous-pages.
      *
      * @return array<int, array<string, string|bool>>
      */
@@ -257,283 +417,161 @@ class MembreController extends Controller
     }
 
     /**
-     * Cartes de statistiques du tableau de bord (données fictives).
+     * Identifiant de l'utilisateur authentifié (clé de session `user_id`).
      *
-     * @return array<int, array<string, string>>
+     * C'est LA seule source de propriété des données : jamais un paramètre
+     * d'URL. Une valeur absente ou non textuelle renvoie null, ce qui conduit
+     * les écrans à afficher un état vide plutôt qu'une erreur.
+     *
+     * @return string|null UUID du membre connecté, ou null
      */
-    private function getStats(): array
+    private function utilisateurId(): ?string
     {
-        return [
-            ['icone' => 'annonces', 'valeur' => '12',    'label' => 'Annonces actives'],
-            ['icone' => 'oeil',     'valeur' => '4 328', 'label' => 'Vues cumulées'],
-            ['icone' => 'messages', 'valeur' => '3',     'label' => 'Messages non lus'],
-            ['icone' => 'favoris',  'valeur' => '7',     'label' => 'Annonces en favori'],
-        ];
+        $id = Session::get('user_id');
+
+        if (!is_string($id)) {
+            return null;
+        }
+
+        $id = trim($id);
+
+        return $id === '' ? null : $id;
     }
 
     /**
-     * Compteurs par statut, dérivés de la liste d'annonces.
+     * Ligne `users` de l'utilisateur connecté (mise en cache par requête).
      *
-     * Les clés correspondent exactement aux valeurs de la colonne
-     * `annonces.status` de la base ('active', 'en_attente', 'expirée',
-     * 'suspendue') afin que le branchement de l'étape 7 soit immédiat.
-     *
-     * @param array<int, array<string, mixed>> $annonces Annonces du membre
-     * @return array<string, int> Nombre d'annonces par statut
+     * @return array<string, mixed>|null Données du compte, ou null
      */
-    private function getCompteursAnnonces(array $annonces): array
+    private function membre(): ?array
     {
-        $compteurs = [
-            'total'      => count($annonces),
-            'active'     => 0,
-            'en_attente' => 0,
-            'expirée'    => 0,
-            'suspendue'  => 0,
-        ];
+        if ($this->membreCharge) {
+            return $this->membre;
+        }
 
-        foreach ($annonces as $annonce) {
-            $statut = $annonce['statut'] ?? null;
+        $this->membreCharge = true;
 
-            if (is_string($statut) && array_key_exists($statut, $compteurs)) {
-                $compteurs[$statut]++;
+        $id = $this->utilisateurId();
+
+        if ($id === null) {
+            return null;
+        }
+
+        $this->membre = (new User())->trouverParId($id);
+
+        return $this->membre;
+    }
+
+    /**
+     * Sélectionne la conversation à afficher dans le volet de lecture.
+     *
+     * Le couple (annonce, interlocuteur) fourni en URL n'est accepté que s'il
+     * correspond à une conversation RÉELLE du membre connecté. Dans tous les
+     * autres cas (aucun paramètre, identifiants inconnus ou appartenant à un
+     * autre membre), la conversation la plus récente est retenue.
+     *
+     * @param array<int, array<string, mixed>> $conversations Conversations du membre
+     * @return array<string, mixed>|null Conversation ouverte, ou null si aucune
+     */
+    private function conversationOuverte(array $conversations): ?array
+    {
+        if ($conversations === []) {
+            return null;
+        }
+
+        $annonce = $this->getInput('annonce');
+        $interlocuteur = $this->getInput('interlocuteur');
+
+        if (is_string($annonce) && is_string($interlocuteur)) {
+            $annonce = trim($annonce);
+            $interlocuteur = trim($interlocuteur);
+
+            if ($annonce !== '' && $interlocuteur !== '') {
+                foreach ($conversations as $conversation) {
+                    if ((string) $conversation['annonces_id'] === $annonce
+                        && (string) $conversation['interlocuteur_id'] === $interlocuteur
+                    ) {
+                        return $conversation;
+                    }
+                }
             }
         }
 
-        return $compteurs;
+        return $conversations[0];
     }
 
     /**
-     * Annonces du membre (données fictives).
+     * Normalise un fil de discussion pour la vue.
      *
-     * Colonnes alignées sur la table `annonces` : titre, categorie_id,
-     * type_annonce, prix, status, nb_vues.
+     * Chaque message est marqué « moi » (envoyé par le membre) ou « contact »
+     * (reçu). Les dates restent brutes : c'est la vue qui les met en forme
+     * (dashTempsRelatif).
      *
-     * @return array<int, array<string, mixed>>
+     * @param array<int, array<string, mixed>> $lignes Messages du fil
+     * @param string|null $userId UUID du membre connecté
+     * @param array<string, mixed>|null $conversation Conversation ouverte
+     * @return array{annonce: string, contact: string, messages: array<int, array<string, mixed>>}
      */
-    private function getAnnonces(): array
+    private function construireFil(array $lignes, ?string $userId, ?array $conversation): array
     {
+        $messages = [];
+
+        foreach ($lignes as $ligne) {
+            $expediteur = (string) ($ligne['sender_id'] ?? '');
+
+            $messages[] = [
+                'auteur'  => ($userId !== null && $expediteur === $userId) ? 'moi' : 'contact',
+                'contenu' => (string) ($ligne['contenu'] ?? ''),
+                'date'    => $ligne['created_at'] ?? null,
+                'lu'      => (int) ($ligne['lu'] ?? 0) === 1,
+            ];
+        }
+
+        if ($conversation !== null) {
+            $contact = trim(
+                (string) ($conversation['interlocuteur_prenom'] ?? '')
+                . ' '
+                . (string) ($conversation['interlocuteur_nom'] ?? '')
+            );
+
+            $annonce = (string) ($conversation['annonce_titre'] ?? '');
+        } else {
+            $contact = '';
+            $annonce = '';
+        }
+
         return [
-            [
-                'titre'     => 'Appartement 3 pièces à Almadies',
-                'categorie' => 'Immobilier',
-                'type'      => 'Location',
-                'prix'      => 250000,
-                'suffixe'   => '/mois',
-                'statut'    => 'active',
-                'vues'      => 1240,
-                'favoris'   => 12,
-                'date'      => 'Il y a 2 heures',
-            ],
-            [
-                'titre'     => 'Samsung Galaxy S23 Ultra 256 Go',
-                'categorie' => 'Téléphones',
-                'type'      => 'Vente',
-                'prix'      => 850000,
-                'suffixe'   => '',
-                'statut'    => 'en_attente',
-                'vues'      => 143,
-                'favoris'   => 4,
-                'date'      => 'Il y a 5 heures',
-            ],
-            [
-                'titre'     => 'MacBook Pro 14" M1 Pro',
-                'categorie' => 'Électronique',
-                'type'      => 'Vente',
-                'prix'      => 1250000,
-                'suffixe'   => '',
-                'statut'    => 'active',
-                'vues'      => 1870,
-                'favoris'   => 21,
-                'date'      => 'Hier',
-            ],
-            [
-                'titre'     => 'Chambre meublée à louer — Liberté 6',
-                'categorie' => 'Immobilier',
-                'type'      => 'Location',
-                'prix'      => 75000,
-                'suffixe'   => '/mois',
-                'statut'    => 'expirée',
-                'vues'      => 890,
-                'favoris'   => 7,
-                'date'      => 'Il y a 3 jours',
-            ],
-            [
-                'titre'     => 'Téléphone Xiaomi Redmi Note 12',
-                'categorie' => 'Téléphones',
-                'type'      => 'Vente',
-                'prix'      => 145000,
-                'suffixe'   => '',
-                'statut'    => 'suspendue',
-                'vues'      => 312,
-                'favoris'   => 2,
-                'date'      => 'Il y a 4 jours',
-            ],
-            [
-                'titre'     => 'Cours particuliers de mathématiques',
-                'categorie' => 'Emploi & Services',
-                'type'      => 'Vente',
-                'prix'      => 15000,
-                'suffixe'   => '/heure',
-                'statut'    => 'active',
-                'vues'      => 468,
-                'favoris'   => 9,
-                'date'      => 'Il y a 5 jours',
-            ],
+            'annonce'  => $annonce,
+            'contact'  => $contact,
+            'messages' => $messages,
         ];
     }
 
     /**
-     * Annonces enregistrées en favori (données fictives).
+     * Statistiques d'annonces à zéro (repli si l'utilisateur est introuvable).
      *
-     * @return array<int, array<string, mixed>>
+     * @return array{total: int, actives: int, en_attente: int, expirees: int, suspendues: int, vues: int}
      */
-    private function getFavoris(): array
+    private function statistiquesVides(): array
     {
         return [
-            [
-                'titre'        => 'Toyota RAV4 2019 — Très bon état',
-                'categorie'    => 'Véhicules',
-                'localisation' => 'Dakar, Plateau',
-                'prix'         => 18500000,
-                'suffixe'      => '',
-                'date'         => 'Ajouté il y a 2 jours',
-                'image'        => 'https://images.unsplash.com/photo-1550355291-bbee04a92027?w=600&q=80',
-            ],
-            [
-                'titre'        => 'Appartement 3 pièces à Almadies',
-                'categorie'    => 'Immobilier',
-                'localisation' => 'Dakar, Almadies',
-                'prix'         => 250000,
-                'suffixe'      => '/mois',
-                'date'         => 'Ajouté il y a 4 jours',
-                'image'        => 'https://images.unsplash.com/photo-1522708323590-d24dbb6b0267?w=600&q=80',
-            ],
-            [
-                'titre'        => 'MacBook Pro 14" M1 Pro',
-                'categorie'    => 'Électronique',
-                'localisation' => 'Dakar, Mermoz',
-                'prix'         => 1250000,
-                'suffixe'      => '',
-                'date'         => 'Ajouté il y a 6 jours',
-                'image'        => 'https://images.unsplash.com/photo-1517336714731-489689fd1ca8?w=600&q=80',
-            ],
-            [
-                'titre'        => 'Samsung Galaxy S23 Ultra',
-                'categorie'    => 'Téléphones',
-                'localisation' => 'Dakar, Ouakam',
-                'prix'         => 850000,
-                'suffixe'      => '',
-                'date'         => 'Ajouté il y a 1 semaine',
-                'image'        => 'https://images.unsplash.com/photo-1610945265064-0e34e5519bbf?w=600&q=80',
-            ],
+            'total'      => 0,
+            'actives'    => 0,
+            'en_attente' => 0,
+            'expirees'   => 0,
+            'suspendues' => 0,
+            'vues'       => 0,
         ];
     }
 
     /**
-     * Conversations de la messagerie (données fictives).
+     * Convertit une valeur issue de la base en chaîne d'affichage nettoyée.
      *
-     * @return array<int, array<string, mixed>>
+     * @param mixed $valeur Valeur (souvent string|null)
+     * @return string Chaîne nettoyée, ou chaîne vide
      */
-    private function getMessages(): array
+    private function texte(mixed $valeur): string
     {
-        return [
-            [
-                'expediteur' => 'Moussa Ndiaye',
-                'sujet'      => 'Toyota RAV4 2019 — Très bon état',
-                'extrait'    => 'Bonjour, le véhicule est-il toujours disponible ?',
-                'date'       => 'Il y a 25 minutes',
-                'non_lu'     => true,
-            ],
-            [
-                'expediteur' => 'Awa Sow',
-                'sujet'      => 'Appartement 3 pièces à Almadies',
-                'extrait'    => "Je souhaiterais visiter l'appartement cette semaine.",
-                'date'       => 'Il y a 3 heures',
-                'non_lu'     => true,
-            ],
-            [
-                'expediteur' => 'Ibrahima Fall',
-                'sujet'      => 'MacBook Pro 14" M1 Pro',
-                'extrait'    => 'Le prix est-il négociable pour un paiement immédiat ?',
-                'date'       => 'Hier',
-                'non_lu'     => true,
-            ],
-            [
-                'expediteur' => 'Fatou Bâ',
-                'sujet'      => 'Cours particuliers de mathématiques',
-                'extrait'    => 'Merci pour votre réponse, à bientôt.',
-                'date'       => 'Il y a 3 jours',
-                'non_lu'     => false,
-            ],
-        ];
-    }
-
-    /**
-     * Fil de discussion affiché dans le volet de lecture (données fictives).
-     *
-     * @return array<string, mixed>
-     */
-    private function getFilConversation(): array
-    {
-        return [
-            'annonce'  => 'Toyota RAV4 2019 — Très bon état',
-            'contact'  => 'Moussa Ndiaye',
-            'messages' => [
-                [
-                    'auteur'  => 'contact',
-                    'contenu' => 'Bonjour, le véhicule est-il toujours disponible ?',
-                    'date'    => 'Il y a 40 minutes',
-                ],
-                [
-                    'auteur'  => 'moi',
-                    'contenu' => 'Bonjour, oui il est toujours disponible. Vous pouvez passer le voir au Plateau.',
-                    'date'    => 'Il y a 32 minutes',
-                ],
-                [
-                    'auteur'  => 'contact',
-                    'contenu' => 'Parfait, je peux passer samedi matin vers 10 h.',
-                    'date'    => 'Il y a 25 minutes',
-                ],
-            ],
-        ];
-    }
-
-    /**
-     * Informations du profil affichées dans le formulaire (démonstration).
-     *
-     * Le prénom provient de la session (donnée déjà disponible) ; les autres
-     * champs sont des valeurs de démonstration et seront remplacés par les
-     * données de la table `users` à l'étape 7.
-     *
-     * @param array{prenom: string, nom: string, email: string, role: string} $utilisateur Utilisateur courant
-     * @return array<string, string>
-     */
-    private function getProfil(array $utilisateur): array
-    {
-        $prenom = $utilisateur['prenom'] !== '' ? $utilisateur['prenom'] : 'Membre';
-
-        return [
-            'prenom'        => $prenom,
-            'nom'           => 'Diop',
-            'email'         => 'membre@petitesannonces.sn',
-            'telephone'     => '+221 77 123 45 67',
-            'ville'         => 'Dakar',
-            'membre_depuis' => 'Mars 2026',
-            'statut'        => 'active',
-        ];
-    }
-
-    /**
-     * Chiffres d'activité affichés sur la page profil (données fictives).
-     *
-     * @return array<int, array<string, string>>
-     */
-    private function getActiviteProfil(): array
-    {
-        return [
-            ['label' => 'Annonces publiées',  'valeur' => '12'],
-            ['label' => 'Annonces en favori', 'valeur' => '7'],
-            ['label' => 'Messages échangés',  'valeur' => '38'],
-        ];
+        return is_string($valeur) ? trim($valeur) : '';
     }
 }

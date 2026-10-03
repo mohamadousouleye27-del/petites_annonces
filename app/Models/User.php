@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Models;
 
 use App\Core\Model;
+use PDO;
 
 /**
  * Modèle User
@@ -119,8 +120,11 @@ class User extends Model
      */
     public function findByEmail(string $email): ?array
     {
-        // Requête préparée avec un placeholder nommé
-        $sql = "SELECT * FROM {$this->table} WHERE email = :email";
+        // Requête préparée avec un placeholder nommé. Le nom de table provient
+        // de la propriété interne du modèle (jamais d'une donnée utilisateur) et
+        // est concaténé sans interpolation afin qu'aucune valeur ne puisse être
+        // interprétée comme du SQL.
+        $sql = 'SELECT * FROM ' . $this->table . ' WHERE email = :email';
         $stmt = $this->getConnection()->prepare($sql);
         $stmt->execute([':email' => $email]);
 
@@ -142,8 +146,9 @@ class User extends Model
      */
     public function findActiveByEmail(string $email): ?array
     {
-        // Requête préparée avec des placeholders nommés
-        $sql = "SELECT * FROM {$this->table} WHERE email = :email AND status = :status";
+        // Requête préparée avec des placeholders nommés. Même règle que dans
+        // findByEmail() : nom de table concaténé, jamais interpolé.
+        $sql = 'SELECT * FROM ' . $this->table . ' WHERE email = :email AND status = :status';
         $stmt = $this->getConnection()->prepare($sql);
         $stmt->execute([
             ':email' => $email,
@@ -153,5 +158,139 @@ class User extends Model
         // Retourne l'enregistrement trouvé ou null s'il n'existe pas
         $result = $stmt->fetch();
         return $result !== false ? $result : null;
+    }
+
+    /**
+     * Nombre maximal de lignes retournées par une liste.
+     *
+     * @var int
+     */
+    private const LIMITE_MAX = 200;
+
+    /**
+     * Liste les comptes avec leur nombre d'annonces.
+     *
+     * Le comptage est assuré par une SOUS-REQUÊTE corrélée : une seule
+     * requête pour toute la liste (aucune requête par ligne).
+     *
+     * Le mot de passe n'est JAMAIS sélectionné ici.
+     *
+     * @param int $limite Nombre maximal de lignes (borné à LIMITE_MAX)
+     * @return array<int, array<string, mixed>> Comptes (tableau vide si aucun)
+     */
+    public function listerTous(int $limite = 100): array
+    {
+        $sql = 'SELECT u.id, u.prenom, u.nom, u.email, u.role, u.telephone,
+                       u.ville_id, u.avatar, u.email_verified, u.status, u.created_at,
+                       v.nom AS ville_nom,
+                       (SELECT COUNT(*) FROM annonces a WHERE a.user_id = u.id) AS nb_annonces
+                FROM users u
+                LEFT JOIN villes v ON v.id = u.ville_id
+                ORDER BY u.created_at DESC, u.id DESC
+                LIMIT :limite';
+
+        $stmt = $this->getConnection()->prepare($sql);
+        $stmt->bindValue(':limite', $this->bornerLimite($limite), PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Liste les comptes ayant un rôle donné.
+     *
+     * @param string $role Rôle technique ('member', 'moderateur', 'admin')
+     * @param int $limite Nombre maximal de lignes (borné à LIMITE_MAX)
+     * @return array<int, array<string, mixed>> Comptes (tableau vide si aucun)
+     */
+    public function listerParRole(string $role, int $limite = 100): array
+    {
+        $sql = 'SELECT u.id, u.prenom, u.nom, u.email, u.role, u.status, u.created_at
+                FROM users u
+                WHERE u.role = :role
+                ORDER BY u.created_at DESC, u.id DESC
+                LIMIT :limite';
+
+        $stmt = $this->getConnection()->prepare($sql);
+        $stmt->bindValue(':role', $role, PDO::PARAM_STR);
+        $stmt->bindValue(':limite', $this->bornerLimite($limite), PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Récupère un compte par son identifiant.
+     *
+     * Le mot de passe n'est pas sélectionné : cette méthode est destinée à
+     * l'affichage, pas à l'authentification (qui utilise findActiveByEmail()).
+     *
+     * @param string $id UUID du compte
+     * @return array<string, mixed>|null Compte trouvé, ou null si absent
+     */
+    public function trouverParId(string $id): ?array
+    {
+        $sql = 'SELECT u.id, u.prenom, u.nom, u.email, u.role, u.telephone,
+                       u.ville_id, u.avatar, u.email_verified, u.status,
+                       u.created_at, u.updated_at,
+                       v.nom AS ville_nom,
+                       (SELECT COUNT(*) FROM annonces a WHERE a.user_id = u.id) AS nb_annonces,
+                       (SELECT COUNT(*) FROM favoris f WHERE f.user_id = u.id) AS nb_favoris
+                FROM users u
+                LEFT JOIN villes v ON v.id = u.ville_id
+                WHERE u.id = :id';
+
+        $stmt = $this->getConnection()->prepare($sql);
+        $stmt->bindValue(':id', $id, PDO::PARAM_STR);
+        $stmt->execute();
+
+        $ligne = $stmt->fetch();
+
+        return $ligne === false ? null : $ligne;
+    }
+
+    /**
+     * Compte tous les comptes de la plateforme.
+     *
+     * @return int Nombre total de comptes (0 si aucun)
+     */
+    public function compter(): int
+    {
+        $stmt = $this->getConnection()->prepare('SELECT COUNT(*) FROM users');
+        $stmt->execute();
+
+        return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * Compte les comptes ayant un rôle donné.
+     *
+     * @param string $role Rôle technique ('member', 'moderateur', 'admin')
+     * @return int Nombre de comptes (0 si aucun)
+     */
+    public function compterParRole(string $role): int
+    {
+        $sql = 'SELECT COUNT(*) FROM users u WHERE u.role = :role';
+
+        $stmt = $this->getConnection()->prepare($sql);
+        $stmt->bindValue(':role', $role, PDO::PARAM_STR);
+        $stmt->execute();
+
+        return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * Borne une limite demandée entre 1 et LIMITE_MAX.
+     *
+     * @param int $limite Limite demandée
+     * @return int Limite effective
+     */
+    private function bornerLimite(int $limite): int
+    {
+        if ($limite < 1) {
+            return 1;
+        }
+
+        return $limite > self::LIMITE_MAX ? self::LIMITE_MAX : $limite;
     }
 }

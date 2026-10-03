@@ -5,30 +5,23 @@
  * Vue de CONTENU uniquement, injectée dans $content du layout
  * app/Views/layouts/connected.php par Controller::viewWithLayout().
  *
- * Données fournies par App\Controllers\ModerateurController::dashboard() :
+ * Données fournies par App\Controllers\ModerateurController::dashboard()
+ * (palier 7.2 — lecture seule, données réelles de la base) :
  *   $stats        : cartes de statistiques (icone, valeur, label)
- *   $signalements : signalements récents (annonce, raison, signale_par, date, statut)
- *   $annonces     : annonces en attente (titre, membre, categorie, type, prix,
- *                   suffixe, soumis, signalements)
+ *   $signalements : signalements récents — colonnes du modèle Signalement
+ *                   (annonce_titre, signaleur_prenom/nom, raison, status,
+ *                   created_at)
+ *   $annonces     : annonces en attente — colonnes du modèle Annonce (titre,
+ *                   categorie_nom, type_annonce, membre_prenom/nom, prix,
+ *                   nb_signalements, created_at)
  *
- * Données statiques (étape 3) : aucun accès base de données.
- * Aucune valeur n'est affichée sans échappement HTML.
+ * Aucune requête SQL ici : la vue affiche les données du contrôleur, mises en
+ * forme par les helpers d'affichage (dashBadgeStatut, dashTempsRelatif,
+ * dashPrixAffiche). Aucune valeur n'est affichée sans échappement HTML.
  */
 
 $esc = static fn (mixed $valeur): string => htmlspecialchars((string) $valeur, ENT_QUOTES, 'UTF-8');
 ?>
-
-<!-- Avertissement de démonstration -->
-<div class="mb-5 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
-    <span class="mt-0.5 text-amber-500">
-        <?= dashIcon('signalements') ?>
-    </span>
-    <p class="text-sm text-stone-700">
-        <span class="font-semibold text-stone-900">Interfaces en cours de construction.</span>
-        Les files de modération affichées sont fictives&nbsp;: le branchement sur les tables
-        <code>signalements</code> et <code>annonces</code> est prévu à l'étape 7.
-    </p>
-</div>
 
 <!-- En-tête de section -->
 <div class="dash-section-head">
@@ -74,33 +67,48 @@ $esc = static fn (mixed $valeur): string => htmlspecialchars((string) $valeur, E
             </a>
         </div>
 
-        <div class="dash-table-wrapper">
-            <table class="dash-table">
-                <caption class="sr-only">Signalements récents</caption>
-                <thead>
-                    <tr>
-                        <th scope="col">Annonce</th>
-                        <th scope="col">Motif</th>
-                        <th scope="col">Statut</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach ($signalements as $signalement): ?>
+        <?php if ($signalements === []): ?>
+            <!-- État vide : aucun signalement en base -->
+            <div class="dash-empty">
+                <p class="dash-empty-title">Aucun signalement</p>
+                <p>Les signalements déposés par les membres apparaîtront ici.</p>
+            </div>
+        <?php else: ?>
+            <div class="dash-table-wrapper">
+                <table class="dash-table">
+                    <caption class="sr-only">Signalements récents</caption>
+                    <thead>
                         <tr>
-                            <td>
-                                <span class="font-medium text-stone-900"><?= $esc($signalement['annonce'] ?? '') ?></span>
-                                <span class="block text-xs text-stone-500">
-                                    Signalé par <?= $esc($signalement['signale_par'] ?? '') ?>
-                                    · <?= $esc($signalement['date'] ?? '') ?>
-                                </span>
-                            </td>
-                            <td><?= $esc($signalement['raison'] ?? '') ?></td>
-                            <td><?= dashBadgeStatut((string) ($signalement['statut'] ?? '')) ?></td>
+                            <th scope="col">Annonce</th>
+                            <th scope="col">Motif</th>
+                            <th scope="col">Statut</th>
                         </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
-        </div>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($signalements as $signalement): ?>
+                            <?php
+                            $signaleur = trim(
+                                (string) ($signalement['signaleur_prenom'] ?? '')
+                                . ' '
+                                . (string) ($signalement['signaleur_nom'] ?? '')
+                            );
+                            ?>
+                            <tr>
+                                <td>
+                                    <span class="font-medium text-stone-900"><?= $esc($signalement['annonce_titre'] ?? '') ?></span>
+                                    <span class="block text-xs text-stone-500">
+                                        Signalé par <?= $esc($signaleur !== '' ? $signaleur : '—') ?>
+                                        · <?= $esc(dashTempsRelatif($signalement['created_at'] ?? null)) ?>
+                                    </span>
+                                </td>
+                                <td><?= $esc($signalement['raison'] ?? '') ?></td>
+                                <td><?= dashBadgeStatut((string) ($signalement['status'] ?? '')) ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        <?php endif; ?>
     </section>
 
     <!-- Annonces en attente de validation -->
@@ -116,33 +124,47 @@ $esc = static fn (mixed $valeur): string => htmlspecialchars((string) $valeur, E
             </a>
         </div>
 
-        <ul class="space-y-3">
-            <?php foreach ($annonces as $annonce): ?>
-                <li class="flex items-start justify-between gap-3 border-b border-stone-100 pb-3 last:border-0 last:pb-0">
-                    <div class="min-w-0">
-                        <p class="truncate text-sm font-medium text-stone-900">
-                            <?= $esc($annonce['titre'] ?? '') ?>
-                        </p>
-                        <p class="text-xs text-stone-500">
-                            <?= $esc($annonce['membre'] ?? '') ?> ·
-                            <?= $esc($annonce['categorie'] ?? '') ?> ·
-                            <?= $esc($annonce['soumis'] ?? '') ?>
-                        </p>
-                        <?php if ((int) ($annonce['signalements'] ?? 0) > 0): ?>
-                            <p class="mt-1">
-                                <span class="dash-badge dash-badge--rejete">
-                                    <?= (int) $annonce['signalements'] ?> signalement(s)
-                                </span>
+        <?php if ($annonces === []): ?>
+            <!-- État vide : aucune annonce en attente -->
+            <div class="dash-empty">
+                <p class="dash-empty-title">Aucune annonce en attente</p>
+                <p>Les annonces soumises à validation apparaîtront ici.</p>
+            </div>
+        <?php else: ?>
+            <ul class="space-y-3">
+                <?php foreach ($annonces as $annonce): ?>
+                    <?php
+                    $membre = trim(
+                        (string) ($annonce['membre_prenom'] ?? '')
+                        . ' '
+                        . (string) ($annonce['membre_nom'] ?? '')
+                    );
+                    ?>
+                    <li class="flex items-start justify-between gap-3 border-b border-stone-100 pb-3 last:border-0 last:pb-0">
+                        <div class="min-w-0">
+                            <p class="truncate text-sm font-medium text-stone-900">
+                                <?= $esc($annonce['titre'] ?? '') ?>
                             </p>
-                        <?php endif; ?>
-                    </div>
+                            <p class="text-xs text-stone-500">
+                                <?= $esc($membre) ?> ·
+                                <?= $esc($annonce['categorie_nom'] ?? '') ?> ·
+                                <?= $esc(dashTempsRelatif($annonce['created_at'] ?? null)) ?>
+                            </p>
+                            <?php if ((int) ($annonce['nb_signalements'] ?? 0) > 0): ?>
+                                <p class="mt-1">
+                                    <span class="dash-badge dash-badge--rejete">
+                                        <?= (int) $annonce['nb_signalements'] ?> signalement(s)
+                                    </span>
+                                </p>
+                            <?php endif; ?>
+                        </div>
 
-                    <p class="shrink-0 text-sm font-semibold text-stone-900">
-                        <?= $esc(formatFcfa($annonce['prix'] ?? null)) ?><?= $esc($annonce['suffixe'] ?? '') ?>
-                    </p>
-                </li>
-            <?php endforeach; ?>
-        </ul>
+                        <p class="shrink-0 text-sm font-semibold text-stone-900">
+                            <?= $esc(dashPrixAffiche($annonce['prix'] ?? null, (string) ($annonce['type_annonce'] ?? ''))) ?>
+                        </p>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
     </section>
 </div>
-

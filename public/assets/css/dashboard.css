@@ -431,6 +431,15 @@ body.dash-page {
     font-family: 'Poppins', sans-serif;
     font-size: 0.75rem;
     font-weight: 700;
+    overflow: hidden;
+}
+
+/* Avatar réel : occupe exactement le même cercle que les initiales */
+.dash-avatar-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
 }
 
 .dash-user-name {
@@ -1047,6 +1056,38 @@ body.dash-page {
 .dash-count--attente {
     background-color: var(--dash-amber-100);
     color: #b45309;
+}
+
+/* ---------- Visuel d'annonce ---------- */
+/* La table `photos` est vide et aucun stockage public n'existe : le
+   remplacement ci-dessous évite une image cassée et reste neutre. */
+.dash-photo {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.dash-photo-vide {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    width: 100%;
+    min-height: 160px;
+    background-color: var(--dash-stone-100);
+    color: var(--dash-stone-400);
+}
+
+.dash-photo-vide .dash-icon {
+    width: 1.75rem;
+    height: 1.75rem;
+}
+
+.dash-photo-vide-texte {
+    font-size: 0.75rem;
+    font-weight: 500;
 }
 
 

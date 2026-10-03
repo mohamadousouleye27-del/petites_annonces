@@ -191,6 +191,98 @@ if (!function_exists('formatFcfa')) {
     }
 }
 
+if (!function_exists('dashAvatar')) {
+    /**
+     * Affiche l'avatar de l'utilisateur connecté, ou ses initiales.
+     *
+     * Le projet ne dispose d'AUCUN système d'envoi d'avatars fonctionnel
+     * (colonne `users.avatar` non renseignée, storage/uploads hors racine
+     * web) : aucune URL d'image n'est donc inventée ici.
+     *
+     * Un avatar n'est rendu que si la valeur est une URL absolue http(s)
+     * ou un chemin absolu serveur (« /… »). Toute autre valeur — chaîne
+     * vide, chemin relatif, nom de fichier brut — est ignorée au profit des
+     * initiales : une image cassée ne peut jamais être affichée.
+     *
+     * @param mixed $avatar Valeur issue de `users.avatar` (ou null)
+     * @param string $prenom Prénom (pour les initiales de repli)
+     * @param string $nom Nom (pour les initiales de repli)
+     * @return string HTML de l'avatar (span d'initiales ou image)
+     */
+    function dashAvatar(mixed $avatar, string $prenom = '', string $nom = ''): string
+    {
+        $avatar = is_string($avatar) ? trim($avatar) : '';
+
+        // Seules les URL absolues http(s) et les chemins absolus sont acceptés
+        $exploitable = $avatar !== ''
+            && (
+                preg_match('#^https?://#i', $avatar) === 1
+                || str_starts_with($avatar, '/')
+            );
+
+        if ($exploitable) {
+            return '<span class="dash-avatar">'
+                . '<img class="dash-avatar-img" src="'
+                . htmlspecialchars($avatar, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
+                . '" alt="" width="32" height="32" loading="lazy">'
+                . '</span>';
+        }
+
+        // Repli propre : les initiales du prénom / nom
+        return '<span class="dash-avatar" aria-hidden="true">'
+            . htmlspecialchars(dashInitiales($prenom, $nom), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
+            . '</span>';
+    }
+}
+
+if (!function_exists('dashMenuParRole')) {
+    /**
+     * Navigation de repli, déduite du rôle technique de l'utilisateur.
+     *
+     * N'EST UTILISÉE QUE si le contrôleur n'a fourni aucune entrée de menu
+     * (`$menu` vide). Les trois contrôleurs transmettent déjà leur navigation
+     * : cette fonction n'est donc qu'un filet de sécurité, jamais une
+     * deuxième source de vérité en fonctionnement normal.
+     *
+     * AUCUNE décision d'accès : les URL construites sont exactement celles
+     * déjà déclarées dans config/routes.php. Le RBAC reste assuré
+     * exclusivement par AuthMiddleware et RoleMiddleware.
+     *
+     * @param string $role Rôle technique ('member', 'moderateur', 'admin')
+     * @return array<int, array<string, string|bool>> Entrées de navigation
+     */
+    function dashMenuParRole(string $role): array
+    {
+        $espaces = [
+            'member'     => [
+                ['label' => 'Tableau de bord', 'href' => base_path('membre'),                'icone' => 'dashboard',    'exact' => true],
+                ['label' => 'Mes annonces',    'href' => base_path('membre/annonces'),       'icone' => 'annonces'],
+                ['label' => 'Favoris',         'href' => base_path('membre/favoris'),        'icone' => 'favoris'],
+                ['label' => 'Messages',        'href' => base_path('membre/messages'),       'icone' => 'messages'],
+                ['label' => 'Mon profil',      'href' => base_path('membre/profil'),         'icone' => 'profil'],
+            ],
+            'moderateur' => [
+                ['label' => 'Tableau de bord',  'href' => base_path('moderateur'),               'icone' => 'dashboard',    'exact' => true],
+                ['label' => 'Signalements',     'href' => base_path('moderateur/signalements'),  'icone' => 'signalements'],
+                ['label' => 'Annonces à modérer', 'href' => base_path('moderateur/annonces'),   'icone' => 'annonces'],
+                ['label' => 'Utilisateurs',     'href' => base_path('moderateur/utilisateurs'), 'icone' => 'utilisateurs'],
+                ['label' => 'Mon journal',      'href' => base_path('moderateur/journal'),      'icone' => 'journal'],
+            ],
+            'admin'      => [
+                ['label' => 'Tableau de bord', 'href' => base_path('admin'),               'icone' => 'dashboard',    'exact' => true],
+                ['label' => 'Utilisateurs',     'href' => base_path('admin/utilisateurs'), 'icone' => 'utilisateurs'],
+                ['label' => 'Annonces',        'href' => base_path('admin/annonces'),     'icone' => 'annonces'],
+                ['label' => 'Catégories',      'href' => base_path('admin/categories'),   'icone' => 'categories'],
+                ['label' => 'Villes',          'href' => base_path('admin/villes'),       'icone' => 'villes'],
+                ['label' => 'Signalements',    'href' => base_path('admin/signalements'), 'icone' => 'signalements'],
+                ['label' => "Journal d'audit", 'href' => base_path('admin/journal'),      'icone' => 'journal'],
+            ],
+        ];
+
+        return $espaces[$role] ?? [];
+    }
+}
+
 if (!function_exists('dashBadgeStatut')) {
     /**
      * Retourne le badge d'affichage correspondant à un statut.
@@ -236,6 +328,185 @@ if (!function_exists('dashBadgeStatut')) {
         return '<span class="dash-badge dash-badge--' . $definition['modificateur'] . '">'
             . htmlspecialchars($definition['label'], ENT_QUOTES, 'UTF-8')
             . '</span>';
+    }
+}
+if (!function_exists('dashTypeAnnonce')) {
+    /**
+     * Libellé français d'un type d'annonce.
+     *
+     * Les clés sont les valeurs exactes de l'ENUM `annonces.type_annonce`.
+     * Un type inconnu est affiché tel quel (échappé), sans erreur.
+     *
+     * @param string $type Type technique ('vente', 'location', 'don', 'recherche')
+     * @return string Libellé français
+     */
+    function dashTypeAnnonce(string $type): string
+    {
+        $libelles = [
+            'vente'     => 'Vente',
+            'location'  => 'Location',
+            'don'       => 'Don',
+            'recherche' => 'Recherche',
+        ];
+
+        return $libelles[$type] ?? $type;
+    }
+}
+
+if (!function_exists('dashSuffixePrix')) {
+    /**
+     * Suffixe de prix associé à un type d'annonce.
+     *
+     * Cette information n'existe PAS en base (la colonne `prix` est un
+     * montant brut) : le suffixe est déduit du type, pour l'affichage.
+     *
+     * @param string $type Type technique de l'annonce
+     * @return string Suffixe ('/mois' pour une location, vide sinon)
+     */
+    function dashSuffixePrix(string $type): string
+    {
+        return $type === 'location' ? '/mois' : '';
+    }
+}
+
+if (!function_exists('dashPrixAffiche')) {
+    /**
+     * Prix prêt à l'affichage, avec son suffixe éventuel.
+     *
+     * Un prix NULL (annonce de type « don » ou « recherche ») affiche un
+     * libellé explicite plutôt qu'un montant vide.
+     *
+     * @param mixed $prix Prix issu de la base (chaîne décimale, int, float ou null)
+     * @param string $type Type technique de l'annonce (pour le suffixe)
+     * @return string Prix formaté
+     */
+    function dashPrixAffiche(mixed $prix, string $type = ''): string
+    {
+        if ($prix === null || $prix === '') {
+            return $type === 'don' ? 'Gratuit' : 'À débattre';
+        }
+
+        return formatFcfa($prix) . dashSuffixePrix($type);
+    }
+}
+
+if (!function_exists('dashDateFr')) {
+    /**
+     * Formate une date MySQL (Y-m-d H:i:s) en français lisible.
+     *
+     * La base renvoie un horodatage « naïf » (aucun fuseau n'est appliqué
+     * par l'application : voir la limite documentée dans le rapport du
+     * palier 7.0). La chaîne est donc interprétée telle quelle par
+     * strtotime(), cohérent avec l'horodatage local du serveur.
+     *
+     * @param mixed $date Date issue de la base, ou null
+     * @return string Date lisible (ex: « 28 sept. 2026 ») ou « — »
+     */
+    function dashDateFr(mixed $date): string
+    {
+        if (!is_string($date) || trim($date) === '') {
+            return '—';
+        }
+
+        $horodatage = strtotime($date);
+
+        if ($horodatage === false) {
+            return '—';
+        }
+
+        $mois = [
+            1 => 'janv.', 2 => 'févr.', 3 => 'mars', 4 => 'avr.',
+            5 => 'mai', 6 => 'juin', 7 => 'juil.', 8 => 'août',
+            9 => 'sept.', 10 => 'oct.', 11 => 'nov.', 12 => 'déc.',
+        ];
+
+        return date('j', $horodatage) . ' ' . $mois[(int) date('n', $horodatage)] . ' ' . date('Y', $horodatage);
+    }
+}
+
+if (!function_exists('dashTempsRelatif')) {
+    /**
+     * Exprime une date MySQL sous forme relative (« il y a 2 heures »).
+     *
+     * Au-delà de 7 jours, une date absolue est affichée. Une date future
+     * (horloges légèrement décalées) est ramenée à « à l'instant » : aucune
+     * valeur négative n'est jamais affichée.
+     *
+     * @param mixed $date Date issue de la base, ou null
+     * @return string Expression relative ou date absolue, « — » si invalide
+     */
+    function dashTempsRelatif(mixed $date): string
+    {
+        if (!is_string($date) || trim($date) === '') {
+            return '—';
+        }
+
+        $horodatage = strtotime($date);
+
+        if ($horodatage === false) {
+            return '—';
+        }
+
+        $ecoule = time() - $horodatage;
+
+        if ($ecoule < 0) {
+            return "à l'instant";
+        }
+
+        if ($ecoule < 60) {
+            return "à l'instant";
+        }
+
+        if ($ecoule < 3600) {
+            $minutes = (int) floor($ecoule / 60);
+
+            return 'il y a ' . $minutes . ' minute' . ($minutes > 1 ? 's' : '');
+        }
+
+        if ($ecoule < 86400) {
+            $heures = (int) floor($ecoule / 3600);
+
+            return 'il y a ' . $heures . ' heure' . ($heures > 1 ? 's' : '');
+        }
+
+        if ($ecoule < 604800) {
+            $jours = (int) floor($ecoule / 86400);
+
+            return 'il y a ' . $jours . ' jour' . ($jours > 1 ? 's' : '');
+        }
+
+        return 'le ' . dashDateFr($date);
+    }
+}
+
+if (!function_exists('dashPhoto')) {
+    /**
+     * Affiche la photo d'une annonce, ou un remplacement neutre.
+     *
+     * ÉTAT ACTUEL : la table `photos` est VIDE et `storage/uploads/` est
+     * protégé par le serveur. Aucune URL externe n'est inventée. Ce helper
+     * rend donc systématiquement le bloc de remplacement, et deviendra
+     * effectif dès qu'un stockage d'images sera disponible (palier
+     * ultérieur). Sa signature est déjà prévue pour ce cas.
+     *
+     * @param mixed $chemin Chemin ou URL éventuel issu de la base (ou null)
+     * @param string $alt Texte alternatif (titre de l'annonce)
+     * @return string HTML du visuel
+     */
+    function dashPhoto(mixed $chemin, string $alt = ''): string
+    {
+        $chemin = is_string($chemin) ? trim($chemin) : '';
+
+        // Aucun visuel disponible : remplacement neutre, sans image cassée
+        if ($chemin === '') {
+            return '<div class="dash-photo-vide" role="img" aria-label="Aucune photo disponible">'
+                . dashIcon('signalements')
+                . '<span class="dash-photo-vide-texte">Aucune photo</span>'
+                . '</div>';
+        }
+
+        return '<img class="dash-photo" src="' . htmlspecialchars($chemin, ENT_QUOTES, 'UTF-8')
+            . '" alt="' . htmlspecialchars($alt, ENT_QUOTES, 'UTF-8') . '" loading="lazy">';
     }
 }
 

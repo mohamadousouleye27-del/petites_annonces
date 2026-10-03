@@ -62,13 +62,110 @@
 <body class="font-inter bg-stone-50 text-stone-900 antialiased">
 
 <?php
-// Helper pour formater les prix en FCFA
-function formatPrix(int $prix): string {
-    return number_format($prix, 0, ',', ' ') . ' FCFA';
+/**
+ * Vue : page d'accueil publique (GET /).
+ *
+ * PALIER 7.5 — toutes les sections dynamiques sont alimentées par les
+ * données RÉELLES de MariaDB, transmises par App\Controllers\HomeController.
+ *
+ * Données reçues du contrôleur :
+ *   $categories      : catégories actives (Categorie::listerActives)
+ *   $annonces        : annonces publiques les plus récentes
+ *                      (Annonce::listerActivesRecentes)
+ *   $villes          : divisions de type « region » (Ville::listerParType)
+ *   $annoncesActives : nombre d'annonces au statut « active »
+ *   $nbMembres       : nombre de comptes enregistrés
+ *   $stats           : statistiques déjà mises en forme par le contrôleur
+ *
+ * AUCUNE requête SQL ici : la vue se contente d'afficher. Toutes les
+ * données issues de la base sont échappées avec $esc / htmlspecialchars
+ * (ENT_QUOTES, UTF-8).
+ */
+
+// Échappement unique pour toutes les données issues de la base.
+$esc = static fn (mixed $valeur): string => htmlspecialchars((string) $valeur, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+/**
+ * Libellé français d'un type d'annonce technique.
+ */
+function libelleTypeAnnonce(string $type): string
+{
+    $libelles = [
+        'vente'     => 'Vente',
+        'location'  => 'Location',
+        'don'       => 'Don',
+        'recherche' => 'Recherche',
+    ];
+
+    return $libelles[$type] ?? $type;
 }
 
-// Helper pour les icônes de catégories
-function iconeCategorie(string $nom): string {
+/**
+ * Prix prêt à l'affichage (montant + suffixe /mois pour une location).
+ */
+function formatPrix(mixed $prix, string $type = ''): string
+{
+    if ($prix === null || $prix === '') {
+        return $type === 'don' ? 'Gratuit' : 'À débattre';
+    }
+
+    return number_format((float) $prix, 0, ',', ' ') . ' FCFA'
+        . ($type === 'location' ? ' /mois' : '');
+}
+
+/**
+ * Date MySQL exprimée en temps relatif (« il y a 2 heures », « le 3 mars 2026 »).
+ */
+function tempsRelatif(mixed $date): string
+{
+    if (!is_string($date) || trim($date) === '') {
+        return '—';
+    }
+
+    $horodatage = strtotime($date);
+
+    if ($horodatage === false) {
+        return '—';
+    }
+
+    $ecoule = time() - $horodatage;
+
+    if ($ecoule < 60) {
+        return "à l'instant";
+    }
+
+    if ($ecoule < 3600) {
+        $minutes = (int) floor($ecoule / 60);
+        return 'il y a ' . $minutes . ' minute' . ($minutes > 1 ? 's' : '');
+    }
+
+    if ($ecoule < 86400) {
+        $heures = (int) floor($ecoule / 3600);
+        return 'il y a ' . $heures . ' heure' . ($heures > 1 ? 's' : '');
+    }
+
+    if ($ecoule < 604800) {
+        $jours = (int) floor($ecoule / 86400);
+        return 'il y a ' . $jours . ' jour' . ($jours > 1 ? 's' : '');
+    }
+
+    $mois = [
+        1 => 'janv.', 2 => 'févr.', 3 => 'mars', 4 => 'avr.', 5 => 'mai', 6 => 'juin',
+        7 => 'juil.', 8 => 'août', 9 => 'sept.', 10 => 'oct.', 11 => 'nov.', 12 => 'déc.',
+    ];
+
+    return 'le ' . date('j', $horodatage) . ' ' . $mois[(int) date('n', $horodatage)] . ' ' . date('Y', $horodatage);
+}
+
+/**
+ * Icône SVG associée à une catégorie, d'après son libellé réel en base.
+ *
+ * La table `categories` ne stocke pas d'icône : le visuel est donc déduit du
+ * nom, avec une icône générique par défaut. Aucune valeur n'est injectée
+ * dans le HTML : seuls des SVG internes (constantes) le sont.
+ */
+function iconeCategorie(string $nom): string
+{
     $icones = [
         'immeuble' => '<svg class="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-4h6v4M9 10h.01M15 10h.01M9 14h.01M15 14h.01"/></svg>',
         'voiture' => '<svg class="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M5 17h14M6 17l-1.5-5.5A2 2 0 016.5 10h11a2 2 0 012 1.5L21 17M6 17a2 2 0 104 0M14 17a2 2 0 104 0M8 10l1-3h6l1 3"/></svg>',
@@ -81,7 +178,30 @@ function iconeCategorie(string $nom): string {
         'autres' => '<svg class="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>',
     ];
 
-    return $icones[$nom] ?? $icones['autres'];
+    // Correspondance libellé réel (base) → jeu d'icônes du design
+    $correspondances = [
+        'immeuble'      => ['immobilier', 'appartement', 'location'],
+        'voiture'       => ['vehicule', 'automobile', 'voiture'],
+        'electronique'  => ['electronique', 'informatique', 'ordinateur'],
+        'telephone'     => ['telephone', 'smartphone', 'mobile'],
+        'mode'          => ['mode', 'vetement', 'habit'],
+        'maison'        => ['maison', 'meuble'],
+        'emploi'        => ['emploi', 'service', 'travail'],
+        'loisirs'       => ['loisir', 'sport', 'jeu'],
+        'autres'        => ['autre'],
+    ];
+
+    $nomNormalise = mb_strtolower(trim($nom), 'UTF-8');
+
+    foreach ($correspondances as $icone => $mots) {
+        foreach ($mots as $mot) {
+            if ($mot !== '' && str_contains($nomNormalise, $mot)) {
+                return $icones[$icone];
+            }
+        }
+    }
+
+    return $icones['autres'];
 }
 ?>
 
@@ -166,7 +286,10 @@ function iconeCategorie(string $nom): string {
                     <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-teal-400 opacity-75"></span>
                     <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-teal-400"></span>
                 </span>
-                <span class="text-teal-100 text-sm font-medium">14 618 annonces actives au Sénégal</span>
+                <span class="text-teal-100 text-sm font-medium">
+                    <?= number_format((int) $annoncesActives, 0, ',', ' ') ?>
+                    annonce<?= ((int) $annoncesActives) > 1 ? 's' : '' ?> active<?= ((int) $annoncesActives) > 1 ? 's' : '' ?> au Sénégal
+                </span>
             </div>
 
             <!-- Titre -->
@@ -207,7 +330,7 @@ function iconeCategorie(string $nom): string {
                     <select name="categorie" class="search-select bg-transparent outline-none text-stone-700 text-base pr-8 cursor-pointer w-full lg:w-auto" aria-label="Catégorie">
                         <option value="">Toutes catégories</option>
                         <?php foreach ($categories as $categorie): ?>
-                            <option value="<?= htmlspecialchars($categorie['nom']) ?>"><?= htmlspecialchars($categorie['nom']) ?></option>
+                            <option value="<?= $esc($categorie['nom']) ?>"><?= $esc($categorie['nom']) ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
@@ -222,20 +345,15 @@ function iconeCategorie(string $nom): string {
                         <path stroke-linecap="round" stroke-linejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
                     </svg>
                     <select name="localisation" class="search-select bg-transparent outline-none text-stone-700 text-base pr-8 cursor-pointer w-full lg:w-auto" aria-label="Localisation">
-                        <option value="Dakar" selected>Dakar</option>
-                        <option value="Thiès">Thiès</option>
-                        <option value="Saint-Louis">Saint-Louis</option>
-                        <option value="Diourbel">Diourbel</option>
-                        <option value="Kaolack">Kaolack</option>
-                        <option value="Ziguinchor">Ziguinchor</option>
-                        <option value="Louga">Louga</option>
-                        <option value="Fatick">Fatick</option>
-                        <option value="Kolda">Kolda</option>
-                        <option value="Matam">Matam</option>
-                        <option value="Kaffrine">Kaffrine</option>
-                        <option value="Kédougou">Kédougou</option>
-                        <option value="Sédhiou">Sédhiou</option>
-                        <option value="Tambacounda">Tambacounda</option>
+                        <?php if ($villes === []): ?>
+                            <option value="">Toutes les localisations</option>
+                        <?php else: ?>
+                            <?php foreach ($villes as $indexVille => $ville): ?>
+                                <option value="<?= $esc($ville['nom']) ?>"<?= $indexVille === 0 ? ' selected' : '' ?>>
+                                    <?= $esc($ville['nom']) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
                     </select>
                 </div>
 
@@ -284,21 +402,35 @@ function iconeCategorie(string $nom): string {
         </div>
 
         <!-- Grille des catégories -->
-        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 lg:gap-6">
-            <?php foreach ($categories as $categorie): ?>
-                <a href="<?= base_path('annonces') ?>?categorie=<?= urlencode($categorie['nom']) ?>" class="category-card bg-white rounded-2xl p-6 lg:p-8 flex flex-col items-center text-center group">
-                    <div class="category-icon w-14 h-14 lg:w-16 lg:h-16 rounded-2xl bg-stone-100 text-stone-600 flex items-center justify-center mb-4">
-                        <?= iconeCategorie($categorie['icone']) ?>
-                    </div>
-                    <h3 class="font-poppins font-semibold text-stone-900 text-sm lg:text-base mb-1">
-                        <?= htmlspecialchars($categorie['nom']) ?>
-                    </h3>
-                    <p class="text-stone-400 text-xs lg:text-sm">
-                        <?= number_format((int)$categorie['nombre'], 0, ',', ' ') ?> annonces
-                    </p>
-                </a>
-            <?php endforeach; ?>
-        </div>
+        <?php if ($categories === []): ?>
+            <!-- État vide : aucune catégorie active en base -->
+            <div class="category-card bg-white rounded-2xl p-10 lg:p-14 flex flex-col items-center text-center">
+                <div class="category-icon w-14 h-14 lg:w-16 lg:h-16 rounded-2xl bg-stone-100 text-stone-400 flex items-center justify-center mb-4">
+                    <?= iconeCategorie('autres') ?>
+                </div>
+                <h3 class="font-poppins font-semibold text-stone-900 text-sm lg:text-base mb-1">
+                    Aucune catégorie disponible
+                </h3>
+                <p class="text-stone-400 text-xs lg:text-sm">Les catégories apparaîtront ici dès leur création.</p>
+            </div>
+        <?php else: ?>
+            <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 lg:gap-6">
+                <?php foreach ($categories as $categorie): ?>
+                    <a href="<?= base_path('annonces') ?>?categorie=<?= urlencode((string) $categorie['nom']) ?>" class="category-card bg-white rounded-2xl p-6 lg:p-8 flex flex-col items-center text-center group">
+                        <div class="category-icon w-14 h-14 lg:w-16 lg:h-16 rounded-2xl bg-stone-100 text-stone-600 flex items-center justify-center mb-4">
+                            <?= iconeCategorie((string) $categorie['nom']) ?>
+                        </div>
+                        <h3 class="font-poppins font-semibold text-stone-900 text-sm lg:text-base mb-1">
+                            <?= $esc($categorie['nom']) ?>
+                        </h3>
+                        <p class="text-stone-400 text-xs lg:text-sm">
+                            <?= number_format((int) ($categorie['nb_annonces'] ?? 0), 0, ',', ' ') ?>
+                            annonce<?= ((int) ($categorie['nb_annonces'] ?? 0)) > 1 ? 's' : '' ?>
+                        </p>
+                    </a>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
 
         <!-- Lien mobile "Voir tout" -->
         <div class="sm:hidden mt-8 text-center">
@@ -332,77 +464,99 @@ function iconeCategorie(string $nom): string {
         </div>
 
         <!-- Grille des annonces -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5 lg:gap-6">
-            <?php foreach ($annonces as $annonce): ?>
-                <article class="annonce-card bg-white rounded-2xl overflow-hidden group">
-                    <!-- Image -->
-                    <div class="annonce-image-wrapper relative h-48 lg:h-52">
-                        <img
-                            src="<?= htmlspecialchars($annonce['image']) ?>"
-                            alt="<?= htmlspecialchars($annonce['titre']) ?>"
-                            class="annonce-image w-full h-full object-cover"
-                            loading="lazy"
-                        >
-                        <!-- Badge -->
-                        <?php if (!empty($annonce['badge'])): ?>
-                            <span class="absolute top-3 left-3 bg-amber-400 text-stone-900 text-xs font-semibold px-3 py-1 rounded-full shadow-md">
-                                <?= htmlspecialchars($annonce['badge']) ?>
-                            </span>
-                        <?php endif; ?>
-
-                        <!-- Type Vente/Location -->
-                        <span class="absolute bottom-3 left-3 bg-stone-900/80 backdrop-blur-sm text-white text-xs font-medium px-3 py-1 rounded-full">
-                            <?= htmlspecialchars($annonce['type']) ?>
-                        </span>
-
-                        <!-- Bouton favori -->
-                        <button class="favori-btn <?= $annonce['favori'] ? 'active' : '' ?> absolute top-3 right-3 w-9 h-9 rounded-full bg-white/90 backdrop-blur-sm shadow-md flex items-center justify-center text-stone-500 hover:text-red-500" aria-label="Ajouter aux favoris">
-                            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/>
+        <?php if ($annonces === []): ?>
+            <!-- État vide : aucune annonce active en base -->
+            <div class="annonce-card bg-white rounded-2xl overflow-hidden p-10 lg:p-14 flex flex-col items-center justify-center text-center">
+                <div class="w-14 h-14 lg:w-16 lg:h-16 rounded-2xl bg-stone-100 text-stone-400 flex items-center justify-center mb-4">
+                    <svg class="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/>
+                    </svg>
+                </div>
+                <h3 class="font-poppins font-semibold text-stone-900 text-base mb-1">Aucune annonce pour le moment</h3>
+                <p class="text-stone-400 text-sm">Les dernières annonces publiées apparaîtront ici.</p>
+            </div>
+        <?php else: ?>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5 lg:gap-6">
+                <?php foreach ($annonces as $annonce): ?>
+                    <?php
+                    // Visuel : la table `photos` est vide et aucun stockage public
+                    // n'existe (palier 7.0). Aucune URL distante n'est inventée :
+                    // un bloc de remplacement neutre est affiché à la place.
+                    $estRecent = strtotime((string) ($annonce['created_at'] ?? '')) >= strtotime('-3 days');
+                    $localisation = trim(
+                        (string) ($annonce['ville_nom'] ?? '')
+                        . (($annonce['quartier'] ?? '') !== '' ? ', ' . (string) $annonce['quartier'] : '')
+                    );
+                    ?>
+                    <article class="annonce-card bg-white rounded-2xl overflow-hidden group">
+                        <!-- Visuel -->
+                        <div class="annonce-image-wrapper relative h-48 lg:h-52 bg-stone-100 flex items-center justify-center">
+                            <svg class="w-12 h-12 text-stone-300" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" role="img" aria-label="Aucune photo disponible pour cette annonce">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/>
                             </svg>
-                        </button>
-                    </div>
+                            <!-- Badge -->
+                            <?php if ($estRecent): ?>
+                                <span class="absolute top-3 left-3 bg-amber-400 text-stone-900 text-xs font-semibold px-3 py-1 rounded-full shadow-md">
+                                    Nouveau
+                                </span>
+                            <?php endif; ?>
+
+                            <!-- Type Vente/Location -->
+                            <span class="absolute bottom-3 left-3 bg-stone-900/80 backdrop-blur-sm text-white text-xs font-medium px-3 py-1 rounded-full">
+                                <?= $esc(libelleTypeAnnonce((string) ($annonce['type_annonce'] ?? ''))) ?>
+                            </span>
+
+                            <!-- Bouton favori -->
+                            <button class="favori-btn absolute top-3 right-3 w-9 h-9 rounded-full bg-white/90 backdrop-blur-sm shadow-md flex items-center justify-center text-stone-500 hover:text-red-500" aria-label="Ajouter aux favoris" disabled>
+                                <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/>
+                                </svg>
+                            </button>
+                        </div>
 
                     <!-- Contenu -->
-                    <div class="p-4 lg:p-5">
-                        <h3 class="font-poppins font-semibold text-stone-900 text-base leading-snug mb-2 line-clamp-2 group-hover:text-teal-700 transition-colors">
-                            <?= htmlspecialchars($annonce['titre']) ?>
-                        </h3>
+                        <div class="p-4 lg:p-5">
+                            <h3 class="font-poppins font-semibold text-stone-900 text-base leading-snug mb-2 line-clamp-2 group-hover:text-teal-700 transition-colors">
+                                <?= $esc($annonce['titre'] ?? '') ?>
+                            </h3>
 
-                        <!-- Prix -->
-                        <div class="mb-3">
-                            <span class="font-poppins font-bold text-teal-700 text-lg">
-                                <?= formatPrix((int)$annonce['prix']) ?>
-                            </span>
-                            <?php if (!empty($annonce['suffixe'])): ?>
-                                <span class="text-stone-400 text-sm"><?= htmlspecialchars($annonce['suffixe']) ?></span>
-                            <?php endif; ?>
-                        </div>
+                            <!-- Catégorie -->
+                            <p class="text-stone-400 text-xs mb-2">
+                                <?= $esc($annonce['categorie_nom'] ?? '') ?>
+                            </p>
 
-                        <!-- Localisation -->
-                        <div class="flex items-center gap-1.5 text-stone-500 text-sm mb-2">
-                            <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
-                            </svg>
-                            <?= htmlspecialchars($annonce['localisation']) ?>
-                        </div>
+                            <!-- Prix -->
+                            <div class="mb-3">
+                                <span class="font-poppins font-bold text-teal-700 text-lg">
+                                    <?= $esc(formatPrix($annonce['prix'] ?? null, (string) ($annonce['type_annonce'] ?? ''))) ?>
+                                </span>
+                            </div>
 
-                        <!-- Vues + Date -->
-                        <div class="flex items-center justify-between pt-3 border-t border-stone-100">
-                            <span class="flex items-center gap-1.5 text-stone-400 text-xs">
-                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                            <!-- Localisation -->
+                            <div class="flex items-center gap-1.5 text-stone-500 text-sm mb-2">
+                                <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
                                 </svg>
-                                <?= number_format((int)$annonce['vues'], 0, ',', ' ') ?> vues
-                            </span>
-                            <span class="text-stone-400 text-xs"><?= htmlspecialchars($annonce['date']) ?></span>
+                                <?= $esc($localisation !== '' ? $localisation : 'Sénégal') ?>
+                            </div>
+
+                            <!-- Vues + Date -->
+                            <div class="flex items-center justify-between pt-3 border-t border-stone-100">
+                                <span class="flex items-center gap-1.5 text-stone-400 text-xs">
+                                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                                    </svg>
+                                    <?= number_format((int) ($annonce['nb_vues'] ?? 0), 0, ',', ' ') ?> vues
+                                </span>
+                                <span class="text-stone-400 text-xs"><?= $esc(tempsRelatif($annonce['created_at'] ?? null)) ?></span>
+                            </div>
                         </div>
-                    </div>
-                </article>
-            <?php endforeach; ?>
-        </div>
+                    </article>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
 
         <!-- Lien mobile "Voir toutes" -->
         <div class="sm:hidden mt-8 text-center">
@@ -430,7 +584,9 @@ function iconeCategorie(string $nom): string {
                     Vous avez quelque chose à vendre ?
                 </h2>
                 <p class="text-teal-50 text-lg lg:text-xl mb-10 max-w-2xl mx-auto">
-                    Publiez votre annonce gratuitement et rejoignez +14 000 vendeurs actifs.
+                    Publiez votre annonce gratuitement et rejoignez nos
+                    <?= number_format((int) $nbMembres, 0, ',', ' ') ?>
+                    membres inscrits.
                 </p>
                 <div class="flex flex-col sm:flex-row items-center justify-center gap-4">
                     <a href="<?= base_path('annonces/creer') ?>" class="bg-amber-400 hover:bg-amber-300 text-stone-900 font-semibold text-base px-8 py-4 rounded-xl transition-all duration-300 hover:shadow-xl hover:shadow-amber-400/30 w-full sm:w-auto">
@@ -525,13 +681,17 @@ function iconeCategorie(string $nom): string {
             <div>
                 <h3 class="font-poppins font-semibold text-white mb-4">Catégories</h3>
                 <ul class="space-y-3">
-                    <?php foreach (array_slice($categories, 0, 5) as $categorie): ?>
-                        <li>
-                            <a href="<?= base_path('annonces') ?>?categorie=<?= urlencode($categorie['nom']) ?>" class="footer-link text-stone-400 hover:text-amber-400 text-sm">
-                                <?= htmlspecialchars($categorie['nom']) ?>
-                            </a>
-                        </li>
-                    <?php endforeach; ?>
+                    <?php if ($categories === []): ?>
+                        <li class="footer-link text-stone-500 text-sm">Aucune catégorie</li>
+                    <?php else: ?>
+                        <?php foreach (array_slice($categories, 0, 5) as $categorie): ?>
+                            <li>
+                                <a href="<?= base_path('annonces') ?>?categorie=<?= urlencode((string) $categorie['nom']) ?>" class="footer-link text-stone-400 hover:text-amber-400 text-sm">
+                                    <?= $esc($categorie['nom']) ?>
+                                </a>
+                            </li>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
                 </ul>
             </div>
 

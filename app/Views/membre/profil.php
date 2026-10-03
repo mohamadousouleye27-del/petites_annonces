@@ -5,14 +5,18 @@
  * Vue de CONTENU uniquement, injectée dans $content du layout
  * app/Views/layouts/connected.php.
  *
- * Données fournies par App\Controllers\MembreController::profil() :
- *   $profil   : informations affichées (prenom, nom, email, telephone,
- *               ville, membre_depuis, statut)
- *   $activite : chiffres d'activité (label, valeur)
+ * Données fournies par App\Controllers\MembreController::profil()
+ * (palier 7.1 — lecture seule, données réelles de la base) :
+ *   $profil   : informations du compte connecté, issues de la table `users`
+ *               (User::trouverParId) : prenom, nom, email, telephone, ville,
+ *               created_at, statut. Les valeurs NULL sont affichées « — ».
+ *   $activite : chiffres d'activité (label, valeur) — annonces publiées et
+ *               favoris (compteurs de la ligne `users`) et messages échangés
+ *               (Message::compterEchanges)
  *
  * Les champs sont en LECTURE SEULE : aucun formulaire actif, donc aucune
- * donnée ne peut être envoyée. L'édition réelle (validation serveur,
- * hachage du mot de passe, écriture en base) est prévue à l'étape 7.
+ * donnée ne peut être envoyée. L'édition réelle (profil, mot de passe) sera
+ * implémentée dans un palier ultérieur.
  *
  * Aucune valeur utilisateur n'est affichée sans échappement HTML.
  */
@@ -24,19 +28,13 @@ $champClasse = 'w-full rounded-xl border border-stone-200 bg-stone-50 px-3 py-2.
 $labelClasse = 'mb-1 block text-xs font-semibold uppercase tracking-wide text-stone-500';
 
 $nomComplet = trim(($profil['prenom'] ?? '') . ' ' . ($profil['nom'] ?? ''));
-?>
 
-<!-- Avertissement de démonstration -->
-<div class="mb-5 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
-    <span class="mt-0.5 text-amber-500">
-        <?= dashIcon('signalements') ?>
-    </span>
-    <p class="text-sm text-stone-700">
-        <span class="font-semibold text-stone-900">Profil en lecture seule.</span>
-        Le prénom affiché provient de votre session ; les autres champs sont des valeurs
-        de démonstration remplacées par la table <code>users</code> à l'étape 7.
-    </p>
-</div>
+// Affiche « — » pour toute valeur absente (NULL / chaîne vide), sans jamais
+// inventer de donnée.
+$presente = static fn (mixed $valeur): string => (is_string($valeur) && trim($valeur) !== '')
+    ? trim($valeur)
+    : '—';
+?>
 
 <!-- En-tête de section -->
 <div class="dash-section-head">
@@ -57,7 +55,7 @@ $nomComplet = trim(($profil['prenom'] ?? '') . ' ' . ($profil['nom'] ?? ''));
             </span>
 
             <p class="mt-3 font-poppins text-base font-semibold text-stone-900">
-                <?= $esc($nomComplet) ?>
+                <?= $esc($presente($nomComplet)) ?>
             </p>
 
             <p class="mt-2">
@@ -65,7 +63,7 @@ $nomComplet = trim(($profil['prenom'] ?? '') . ' ' . ($profil['nom'] ?? ''));
             </p>
 
             <p class="mt-2 text-xs text-stone-500">
-                <?= $esc($profil['membre_depuis'] ?? '') ?>
+                Membre depuis le <?= $esc(dashDateFr($profil['created_at'] ?? null)) ?>
             </p>
         </section>
 
@@ -124,13 +122,13 @@ $nomComplet = trim(($profil['prenom'] ?? '') . ' ' . ($profil['nom'] ?? ''));
                 <div>
                     <label class="<?= $labelClasse ?>" for="profil-telephone">Téléphone</label>
                     <input class="<?= $champClasse ?>" type="tel" id="profil-telephone" name="telephone"
-                           value="<?= $esc($profil['telephone'] ?? '') ?>" maxlength="20">
+                           value="<?= $esc($presente($profil['telephone'] ?? null)) ?>" maxlength="20">
                 </div>
 
                 <div class="sm:col-span-2">
                     <label class="<?= $labelClasse ?>" for="profil-ville">Ville</label>
                     <input class="<?= $champClasse ?>" type="text" id="profil-ville" name="ville"
-                           value="<?= $esc($profil['ville'] ?? '') ?>" maxlength="100">
+                           value="<?= $esc($presente($profil['ville'] ?? null)) ?>" maxlength="100">
                 </div>
             </fieldset>
         </section>
@@ -159,8 +157,8 @@ $nomComplet = trim(($profil['prenom'] ?? '') . ' ' . ($profil['nom'] ?? ''));
             </fieldset>
 
             <p class="mt-4 text-xs text-stone-500">
-                Le changement de mot de passe sera activé à l'étape 7 : validation côté serveur,
-                hachage avec <code>password_hash()</code> et protection CSRF.
+                Le changement de mot de passe sera disponible dans une prochaine étape : validation
+                côté serveur, hachage avec <code>password_hash()</code> et protection CSRF.
             </p>
         </section>
     </div>

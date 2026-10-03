@@ -5,34 +5,21 @@
  * Vue de CONTENU uniquement, injectée dans $content du layout
  * app/Views/layouts/connected.php.
  *
- * Données fournies par App\Controllers\ModerateurController::utilisateurs() :
- *   $utilisateurs : comptes (nom, email, role, statut, inscrit, annonces)
+ * Données fournies par App\Controllers\ModerateurController::utilisateurs()
+ * (palier 7.2 — lecture seule, données réelles de la base) :
+ *   $utilisateurs : comptes, colonnes du modèle User (prenom, nom, email,
+ *                   role, ville_nom, status, created_at, nb_annonces)
  *
- * PAGE EN LECTURE SEULE : le rôle modérateur consulte les comptes, il ne
- * modifie ni les rôles ni les statuts (gestion réservée à l'espace
- * administrateur, étape 4). Aucun bouton d'action n'est donc proposé.
+ * PAGE EN LECTURE SEULE : le modérateur consulte les comptes mais ne modifie
+ * ni les rôles ni les statuts (gestion réservée à l'espace administrateur).
+ * Aucun bouton d'action n'est proposé. Le mot de passe et les jetons ne sont
+ * jamais affichés (le modèle ne les sélectionne pas).
  *
- * Le rôle technique est affiché tel quel ('member', 'moderateur', 'admin'),
- * sans créer de second référentiel de libellés.
- *
- * Données statiques (étape 3) : aucun accès base de données.
- * Aucune valeur n'est affichée sans échappement HTML.
+ * Aucune requête SQL ici. Aucune valeur n'est affichée sans échappement HTML.
  */
 
 $esc = static fn (mixed $valeur): string => htmlspecialchars((string) $valeur, ENT_QUOTES, 'UTF-8');
 ?>
-
-<!-- Avertissement de démonstration -->
-<div class="mb-5 flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4">
-    <span class="mt-0.5 text-amber-500">
-        <?= dashIcon('signalements') ?>
-    </span>
-    <p class="text-sm text-stone-700">
-        <span class="font-semibold text-stone-900">Consultation seule.</span>
-        Les comptes affichés sont fictifs (table <code>users</code>). Un modérateur
-        consulte les comptes mais ne modifie ni les rôles ni les statuts.
-    </p>
-</div>
 
 <!-- En-tête de section -->
 <div class="dash-section-head">
@@ -46,41 +33,62 @@ $esc = static fn (mixed $valeur): string => htmlspecialchars((string) $valeur, E
     <span class="dash-badge dash-badge--neutre">Lecture seule</span>
 </div>
 
-<!-- Tableau des comptes -->
-<section class="dash-card dash-card--flush">
-    <div class="dash-table-wrapper">
-        <table class="dash-table">
-            <caption class="sr-only">Comptes de la plateforme (lecture seule)</caption>
-            <thead>
-                <tr>
-                    <th scope="col">Utilisateur</th>
-                    <th scope="col">Rôle</th>
-                    <th scope="col">Statut</th>
-                    <th scope="col">Inscrit</th>
-                    <th scope="col">Annonces</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($utilisateurs as $utilisateur): ?>
+<?php if ($utilisateurs === []): ?>
+    <!-- État vide : aucun compte à afficher -->
+    <section class="dash-card">
+        <div class="dash-empty">
+            <p class="dash-empty-title">Aucun utilisateur</p>
+            <p>Aucun compte n'est disponible en base.</p>
+        </div>
+    </section>
+<?php else: ?>
+    <!-- Tableau des comptes -->
+    <section class="dash-card dash-card--flush">
+        <div class="dash-table-wrapper">
+            <table class="dash-table">
+                <caption class="sr-only">Comptes de la plateforme (lecture seule)</caption>
+                <thead>
                     <tr>
-                        <td>
-                            <span class="font-medium text-stone-900"><?= $esc($utilisateur['nom'] ?? '') ?></span>
-                            <span class="block text-xs text-stone-500"><?= $esc($utilisateur['email'] ?? '') ?></span>
-                        </td>
-                        <td>
-                            <span class="dash-badge dash-badge--neutre">
-                                <code><?= $esc($utilisateur['role'] ?? '') ?></code>
-                            </span>
-                        </td>
-                        <td><?= dashBadgeStatut((string) ($utilisateur['statut'] ?? '')) ?></td>
-                        <td class="whitespace-nowrap text-stone-500"><?= $esc($utilisateur['inscrit'] ?? '') ?></td>
-                        <td><?= (int) ($utilisateur['annonces'] ?? 0) ?></td>
+                        <th scope="col">Utilisateur</th>
+                        <th scope="col">Rôle</th>
+                        <th scope="col">Ville</th>
+                        <th scope="col">Statut</th>
+                        <th scope="col">Inscrit</th>
+                        <th scope="col">Annonces</th>
                     </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
-    </div>
-</section>
+                </thead>
+                <tbody>
+                    <?php foreach ($utilisateurs as $utilisateur): ?>
+                        <?php
+                        $nomComplet = trim(
+                            (string) ($utilisateur['prenom'] ?? '')
+                            . ' '
+                            . (string) ($utilisateur['nom'] ?? '')
+                        );
+                        ?>
+                        <tr>
+                            <td>
+                                <span class="font-medium text-stone-900"><?= $esc($nomComplet) ?></span>
+                                <span class="block text-xs text-stone-500"><?= $esc($utilisateur['email'] ?? '') ?></span>
+                            </td>
+                            <td>
+                                <span class="dash-badge dash-badge--neutre">
+                                    <code><?= $esc($utilisateur['role'] ?? '') ?></code>
+                                </span>
+                            </td>
+                            <td class="text-stone-500"><?= $esc($utilisateur['ville_nom'] ?? '—') ?></td>
+                            <td><?= dashBadgeStatut((string) ($utilisateur['status'] ?? '')) ?></td>
+                            <td class="whitespace-nowrap text-stone-500">
+                                <?= $esc(dashDateFr($utilisateur['created_at'] ?? null)) ?>
+                            </td>
+                            <td><?= (int) ($utilisateur['nb_annonces'] ?? 0) ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    </section>
+<?php endif; ?>
 
 <!-- Rappel du périmètre du rôle -->
 <p class="mt-4 text-xs text-stone-500">

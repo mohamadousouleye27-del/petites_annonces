@@ -267,6 +267,7 @@ if (!function_exists('dashMenuParRole')) {
                 ['label' => 'Annonces à modérer', 'href' => base_path('moderateur/annonces'),   'icone' => 'annonces'],
                 ['label' => 'Utilisateurs',     'href' => base_path('moderateur/utilisateurs'), 'icone' => 'utilisateurs'],
                 ['label' => 'Mon journal',      'href' => base_path('moderateur/journal'),      'icone' => 'journal'],
+                ['label' => 'Mon profil',       'href' => base_path('moderateur/profil'),       'icone' => 'profil'],
             ],
             'admin'      => [
                 ['label' => 'Tableau de bord', 'href' => base_path('admin'),               'icone' => 'dashboard',    'exact' => true],
@@ -276,6 +277,7 @@ if (!function_exists('dashMenuParRole')) {
                 ['label' => 'Villes',          'href' => base_path('admin/villes'),       'icone' => 'villes'],
                 ['label' => 'Signalements',    'href' => base_path('admin/signalements'), 'icone' => 'signalements'],
                 ['label' => "Journal d'audit", 'href' => base_path('admin/journal'),      'icone' => 'journal'],
+                ['label' => 'Mon profil',      'href' => base_path('admin/profil'),       'icone' => 'profil'],
             ],
         ];
 

@@ -166,6 +166,30 @@ class Signalement extends Model
         return (int) $stmt->fetchColumn();
     }
 
+/**
+     * Compte les signalements traités par un utilisateur donné.
+     *
+     * Le responsable du traitement est identifié par la colonne réelle
+     * `resolved_by` de la table `signalements` (FK ON DELETE SET NULL) :
+     * aucune colonne n'est inventée. Utilisé par le profil du modérateur pour
+     * mesurer son activité réelle de modération.
+     *
+     * LECTURE SEULE : requête préparée, aucune écriture.
+     *
+     * @param string $userId UUID du modérateur
+     * @return int Nombre de signalements traités (0 si aucun)
+     */
+    public function compterResolusPar(string $userId): int
+    {
+        $sql = 'SELECT COUNT(*) FROM signalements s WHERE s.resolved_by = :user_id';
+
+        $stmt = $this->getConnection()->prepare($sql);
+        $stmt->bindValue(':user_id', $userId, PDO::PARAM_STR);
+        $stmt->execute();
+
+        return (int) $stmt->fetchColumn();
+    }
+
     /**
      * Borne une limite demandée entre 1 et LIMITE_MAX.
      *

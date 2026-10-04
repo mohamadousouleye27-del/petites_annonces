@@ -9,6 +9,7 @@ use App\Core\Session;
 use App\Models\Annonce;
 use App\Models\AuditLog;
 use App\Models\Categorie;
+use App\Models\Message;
 use App\Models\Signalement;
 use App\Models\User;
 use App\Models\Ville;
@@ -106,6 +107,22 @@ class AdminController extends Controller
      * @var int
      */
     private const DERNIERES_ENTREES = 5;
+
+    /**
+     * La ligne `users` de l'administrateur connecté a-t-elle été chargée ?
+     *
+     * Évite une seconde requête identique au cours de la même page.
+     *
+     * @var bool
+     */
+    private bool $adminCharge = false;
+
+    /**
+     * Ligne `users` de l'administrateur connecté (null s'il est introuvable).
+     *
+     * @var array<string, mixed>|null
+     */
+    private ?array $admin = null;
 
     /**
      * Tableau de bord de la plateforme (GET /admin).
@@ -280,6 +297,82 @@ class AdminController extends Controller
     }
 
     /**
+     * Profil de l'administrateur connecté (GET /admin/profil).
+     *
+     * LECTURE SEULE STRICTE : aucune écriture, aucun formulaire, aucun POST.
+     * Le HTML est entièrement délégué au partial commun
+     * app/Views/layouts/partials/profil-contenu.php, également utilisé par les
+     * profils membre et modérateur (design identique pour les trois espaces).
+     *
+     * CLOISONNEMENT : le compte affiché est TOUJOURS l'utilisateur connecté,
+     * déterminé par la clé de session `user_id`. Aucun identifiant n'est lu
+     * dans l'URL, $_GET, $_POST ou $_REQUEST : il est impossible de consulter
+     * le profil d'un autre compte. Le contrôle d'accès (403 pour les autres
+     * rôles) reste assuré par les middlewares de config/routes.php, jamais ici.
+     *
+     * AUCUNE donnée sensible n'est transmise à la vue : `password_hash` n'est
+     * jamais sélectionné par User::trouverParId().
+     *
+     * @return void
+     */
+    public function profil(): void
+    {
+        $userId = $this->utilisateurId();
+        $utilisateur = $this->admin() ?? [];
+
+        $profil = [
+            'prenom'         => $this->texte($utilisateur['prenom'] ?? null),
+            'nom'            => $this->texte($utilisateur['nom'] ?? null),
+            'email'          => $this->texte($utilisateur['email'] ?? null),
+            'telephone'      => $utilisateur['telephone'] ?? null,
+            'ville'          => $utilisateur['ville_nom'] ?? null,
+            // Rôle issu de la base : le libellé français est produit par
+            // Auth::label() dans la vue (référentiel unique de libellés).
+            'role'           => $this->texte($utilisateur['role'] ?? null),
+            'statut'         => $this->texte($utilisateur['status'] ?? null),
+            'avatar'         => $utilisateur['avatar'] ?? null,
+            'email_verifie'  => (int) ($utilisateur['email_verified'] ?? 0),
+            'created_at'     => $utilisateur['created_at'] ?? null,
+        ];
+
+        // Activité propre à l'administrateur : actions journalisées à son
+        // nom (AuditLog), annonces et messages rattachés à son compte. Un
+        // seul appel par modèle : aucune requête dans une boucle.
+        $activite = [
+            [
+                'label'  => 'Actions journalisées',
+                'valeur' => $userId !== null
+                    ? (new AuditLog())->compterParUtilisateur($userId)
+                    : 0,
+            ],
+            [
+                'label'  => 'Annonces publiées',
+                'valeur' => (int) ($utilisateur['nb_annonces'] ?? 0),
+            ],
+            [
+                'label'  => 'Annonces en favori',
+                'valeur' => (int) ($utilisateur['nb_favoris'] ?? 0),
+            ],
+            [
+                'label'  => 'Messages échangés',
+                'valeur' => $userId !== null
+                    ? (new Message())->compterEchanges($userId)
+                    : 0,
+            ],
+        ];
+
+        $donnees = $this->pageData(
+            'Mon profil',
+            'Vos informations personnelles et votre activité'
+        ) + [
+            'profil'   => $profil,
+            'activite' => $activite,
+        ];
+
+        $this->viewWithLayout('admin/profil', $donnees);
+    }
+
+    /**
      * Données communes à toutes les pages de l'espace Administrateur.
      *
      * @param string $pageTitle Titre affiché dans le bandeau de la topbar
@@ -302,22 +395,101 @@ class AdminController extends Controller
     /**
      * Identité de l'utilisateur connecté, pour l'affichage uniquement.
      *
-     * Seules deux clés de session sont lues : `user_prenom` et `user_role`,
-     * renseignées à la connexion par AuthController. Aucune requête SQL.
-     * Aucune décision d'accès n'est prise à partir de ces valeurs.
+     * Trois sources, dans cet ordre strict :
+     *   1. la clé de session `user_id` → User::trouverParId() (données réelles
+     *      de la table `users`, une seule requête mise en cache par page) ;
+     *   2. le repli session (`user_prenom`) si la ligne n'a pas pu être chargée
+     *      (repli de compatibilité conservé) ;
+     *   3. des chaînes vides sinon, jamais de donnée inventée.
+     *
+     * Aucune décision d'accès n'est prise à partir de ces valeurs : le rôle
+     * n'est qu'une donnée affichée, le cloisonnement reste assuré par
+     * RoleMiddleware.
      *
      * @return array{prenom: string, nom: string, email: string, role: string}
      */
     private function utilisateurCourant(): array
     {
-        $prenom = Session::get('user_prenom');
+        $utilisateur = $this->admin() ?? [];
+
+        $prenom = $this->texte($utilisateur['prenom'] ?? null);
+        $nom    = $this->texte($utilisateur['nom'] ?? null);
+        $email  = $this->texte($utilisateur['email'] ?? null);
+
+        // Repli sur la session si la ligne n'a pas pu être chargée
+        if ($prenom === '') {
+            $sessionPrenom = Session::get('user_prenom');
+            $prenom = is_string($sessionPrenom) ? trim($sessionPrenom) : '';
+        }
 
         return [
-            'prenom' => is_string($prenom) ? trim($prenom) : '',
-            'nom'    => '',
-            'email'  => '',
+            'prenom' => $prenom,
+            'nom'    => $nom,
+            'email'  => $email,
             'role'   => $this->currentRole(),
         ];
+    }
+
+    /**
+     * Identifiant de l'utilisateur authentifié (clé de session `user_id`).
+     *
+     * C'est LA seule source d'identité de ce contrôleur : jamais un paramètre
+     * d'URL. Une valeur absente ou non textuelle renvoie null, ce qui conduit
+     * les écrans à afficher un état vide plutôt qu'une erreur ou le profil
+     * d'un autre utilisateur.
+     *
+     * @return string|null UUID de l'administrateur connecté, ou null
+     */
+    private function utilisateurId(): ?string
+    {
+        $id = Session::get('user_id');
+
+        if (!is_string($id)) {
+            return null;
+        }
+
+        $id = trim($id);
+
+        return $id === '' ? null : $id;
+    }
+
+    /**
+     * Ligne `users` de l'administrateur connecté (mise en cache par requête).
+     *
+     * Au plus UNE lecture de l'utilisateur connecté par requête HTTP : le
+     * résultat est mémorisé, y compris lorsqu'il est introuvable (évite un
+     * second appel identique).
+     *
+     * @return array<string, mixed>|null Données du compte, ou null
+     */
+    private function admin(): ?array
+    {
+        if ($this->adminCharge) {
+            return $this->admin;
+        }
+
+        $this->adminCharge = true;
+
+        $id = $this->utilisateurId();
+
+        if ($id === null) {
+            return null;
+        }
+
+        $this->admin = (new User())->trouverParId($id);
+
+        return $this->admin;
+    }
+
+    /**
+     * Convertit une valeur issue de la base en chaîne d'affichage nettoyée.
+     *
+     * @param mixed $valeur Valeur (souvent string|null)
+     * @return string Chaîne nettoyée, ou chaîne vide
+     */
+    private function texte(mixed $valeur): string
+    {
+        return is_string($valeur) ? trim($valeur) : '';
     }
 
     /**
@@ -368,6 +540,11 @@ class AdminController extends Controller
                 'href'  => base_path('admin/journal'),
                 'icone' => 'journal',
             ],
+            [
+                'label' => 'Mon profil',
+                'href'  => base_path('admin/profil'),
+                'icone' => 'profil',
+            ],
         ];
     }
 
@@ -379,6 +556,7 @@ class AdminController extends Controller
     private function liensUtilisateur(): array
     {
         return [
+            ['label' => 'Mon profil',       'href' => base_path('admin/profil'),      'icone' => 'profil'],
             ['label' => 'Utilisateurs',    'href' => base_path('admin/utilisateurs'), 'icone' => 'utilisateurs'],
             ['label' => 'Catégories',      'href' => base_path('admin/categories'),   'icone' => 'categories'],
             ['label' => 'Villes',          'href' => base_path('admin/villes'),       'icone' => 'villes'],

@@ -8,6 +8,7 @@ use App\Core\Controller;
 use App\Core\Session;
 use App\Models\Annonce;
 use App\Models\AuditLog;
+use App\Models\Message;
 use App\Models\Signalement;
 use App\Models\User;
 
@@ -83,6 +84,22 @@ class ModerateurController extends Controller
      * @var int
      */
     private const DERNIERES_DECISIONS = 4;
+
+    /**
+     * La ligne `users` du modérateur connecté a-t-elle été chargée ?
+     *
+     * Évite une seconde requête identique au cours de la même page.
+     *
+     * @var bool
+     */
+    private bool $moderateurCharge = false;
+
+    /**
+     * Ligne `users` du modérateur connecté (null s'il est introuvable).
+     *
+     * @var array<string, mixed>|null
+     */
+    private ?array $moderateur = null;
 
     /**
      * Tableau de bord de la modération (GET /moderateur).
@@ -205,6 +222,85 @@ class ModerateurController extends Controller
     }
 
     /**
+     * Profil du modérateur connecté (GET /moderateur/profil).
+     *
+     * LECTURE SEULE STRICTE : aucune écriture, aucun formulaire, aucun POST.
+     * Le HTML est entièrement délégué au partial commun
+     * app/Views/layouts/partials/profil-contenu.php, également utilisé par les
+     * profils membre et administrateur (design identique pour les trois espaces).
+     *
+     * CLOISONNEMENT : le compte affiché est TOUJOURS l'utilisateur connecté,
+     * déterminé par la clé de session `user_id`. Aucun identifiant n'est lu
+     * dans l'URL, $_GET, $_POST ou $_REQUEST : il est impossible de consulter
+     * le profil d'un autre compte. Le contrôle d'accès (403 pour les autres
+     * rôles) reste assuré par les middlewares de config/routes.php, jamais ici.
+     *
+     * AUCUNE donnée sensible n'est transmise à la vue : `password_hash` n'est
+     * jamais sélectionné par User::trouverParId().
+     *
+     * @return void
+     */
+    public function profil(): void
+    {
+        $userId = $this->utilisateurId();
+        $utilisateur = $this->moderateur() ?? [];
+
+        $profil = [
+            'prenom'        => $this->texte($utilisateur['prenom'] ?? null),
+            'nom'           => $this->texte($utilisateur['nom'] ?? null),
+            'email'         => $this->texte($utilisateur['email'] ?? null),
+            'telephone'     => $utilisateur['telephone'] ?? null,
+            'ville'         => $utilisateur['ville_nom'] ?? null,
+            // Rôle issu de la base : le libellé français est produit par
+            // Auth::label() dans la vue (référentiel unique de libellés).
+            'role'          => $this->texte($utilisateur['role'] ?? null),
+            'statut'        => $this->texte($utilisateur['status'] ?? null),
+            'avatar'        => $utilisateur['avatar'] ?? null,
+            'email_verifie' => (int) ($utilisateur['email_verified'] ?? 0),
+            'created_at'    => $utilisateur['created_at'] ?? null,
+        ];
+
+        // Activité propre au rôle de modération : décisions journalisées à
+        // son nom (AuditLog) et signalements qu'il a traités (colonne réelle
+        // `resolved_by`). Un seul appel par modèle : aucune requête dans une
+        // boucle.
+        $activite = [
+            [
+                'label'  => 'Signalements traités',
+                'valeur' => $userId !== null
+                    ? (new Signalement())->compterResolusPar($userId)
+                    : 0,
+            ],
+            [
+                'label'  => 'Actions journalisées',
+                'valeur' => $userId !== null
+                    ? (new AuditLog())->compterParUtilisateur($userId)
+                    : 0,
+            ],
+            [
+                'label'  => 'Annonces publiées',
+                'valeur' => (int) ($utilisateur['nb_annonces'] ?? 0),
+            ],
+            [
+                'label'  => 'Messages échangés',
+                'valeur' => $userId !== null
+                    ? (new Message())->compterEchanges($userId)
+                    : 0,
+            ],
+        ];
+
+        $donnees = $this->pageData(
+            'Mon profil',
+            'Vos informations personnelles et votre activité'
+        ) + [
+            'profil'   => $profil,
+            'activite' => $activite,
+        ];
+
+        $this->viewWithLayout('moderateur/profil', $donnees);
+    }
+
+    /**
      * Données communes à toutes les pages de l'espace Modérateur.
      *
      * @param string $pageTitle Titre affiché dans le bandeau de la topbar
@@ -227,22 +323,78 @@ class ModerateurController extends Controller
     /**
      * Identité de l'utilisateur connecté, pour l'affichage uniquement.
      *
-     * Seules deux clés de session sont lues : `user_prenom` et `user_role`,
-     * renseignées à la connexion par AuthController. Aucune requête SQL.
-     * Aucune décision d'accès n'est prise à partir de ces valeurs.
+     * Trois sources, dans cet ordre strict :
+     *   1. la clé de session `user_id` → User::trouverParId() (données réelles
+     *      de la table `users`, une seule requête mise en cache par page) ;
+     *   2. le repli session (`user_prenom`) si la ligne n'a pas pu être chargée
+     *      (repli de compatibilité conservé) ;
+     *   3. des chaînes vides sinon, jamais de donnée inventée.
+     *
+     * Aucune décision d'accès n'est prise à partir de ces valeurs : le rôle
+     * n'est qu'une donnée affichée, le cloisonnement reste assuré par
+     * RoleMiddleware.
      *
      * @return array{prenom: string, nom: string, email: string, role: string}
      */
     private function utilisateurCourant(): array
     {
-        $prenom = Session::get('user_prenom');
+        $utilisateur = $this->moderateur() ?? [];
+
+        $prenom = $this->texte($utilisateur['prenom'] ?? null);
+        $nom    = $this->texte($utilisateur['nom'] ?? null);
+        $email  = $this->texte($utilisateur['email'] ?? null);
+
+        // Repli sur la session si la ligne n'a pas pu être chargée
+        if ($prenom === '') {
+            $sessionPrenom = Session::get('user_prenom');
+            $prenom = is_string($sessionPrenom) ? trim($sessionPrenom) : '';
+        }
 
         return [
-            'prenom' => is_string($prenom) ? trim($prenom) : '',
-            'nom'    => '',
-            'email'  => '',
+            'prenom' => $prenom,
+            'nom'    => $nom,
+            'email'  => $email,
             'role'   => $this->currentRole(),
         ];
+    }
+
+    /**
+     * Ligne `users` du modérateur connecté (mise en cache par requête).
+     *
+     * Au plus UNE lecture de l'utilisateur connecté par requête HTTP : le
+     * résultat est mémorisé, y compris lorsqu'il est introuvable (évite un
+     * second appel identique).
+     *
+     * @return array<string, mixed>|null Données du compte, ou null
+     */
+    private function moderateur(): ?array
+    {
+        if ($this->moderateurCharge) {
+            return $this->moderateur;
+        }
+
+        $this->moderateurCharge = true;
+
+        $id = $this->utilisateurId();
+
+        if ($id === null) {
+            return null;
+        }
+
+        $this->moderateur = (new User())->trouverParId($id);
+
+        return $this->moderateur;
+    }
+
+    /**
+     * Convertit une valeur issue de la base en chaîne d'affichage nettoyée.
+     *
+     * @param mixed $valeur Valeur (souvent string|null)
+     * @return string Chaîne nettoyée, ou chaîne vide
+     */
+    private function texte(mixed $valeur): string
+    {
+        return is_string($valeur) ? trim($valeur) : '';
     }
 
     /**
@@ -343,6 +495,11 @@ class ModerateurController extends Controller
                 'href'  => base_path('moderateur/journal'),
                 'icone' => 'journal',
             ],
+            [
+                'label' => 'Mon profil',
+                'href'  => base_path('moderateur/profil'),
+                'icone' => 'profil',
+            ],
         ];
     }
 
@@ -354,6 +511,7 @@ class ModerateurController extends Controller
     private function liensUtilisateur(): array
     {
         return [
+            ['label' => 'Mon profil',         'href' => base_path('moderateur/profil'),      'icone' => 'profil'],
             ['label' => 'Signalements',       'href' => base_path('moderateur/signalements'), 'icone' => 'signalements'],
             ['label' => 'Annonces à modérer', 'href' => base_path('moderateur/annonces'),     'icone' => 'annonces'],
             ['label' => 'Utilisateurs',       'href' => base_path('moderateur/utilisateurs'), 'icone' => 'utilisateurs'],

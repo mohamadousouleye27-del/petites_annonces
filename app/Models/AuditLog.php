@@ -156,6 +156,28 @@ class AuditLog extends Model
         return (int) $stmt->fetchColumn();
     }
 
+/**
+     * Compte les actions d'audit attribuées à un utilisateur donné.
+     *
+     * Utilisé par les profils modérateur et administrateur : compte les
+     * décisions/actions journalisées pour CE compte uniquement.
+     *
+     * LECTURE SEULE : requête préparée, aucune écriture.
+     *
+     * @param string $userId UUID de l'utilisateur
+     * @return int Nombre d'entrées (0 si aucune)
+     */
+    public function compterParUtilisateur(string $userId): int
+    {
+        $sql = 'SELECT COUNT(*) FROM audit_logs l WHERE l.user_id = :user_id';
+
+        $stmt = $this->getConnection()->prepare($sql);
+        $stmt->bindValue(':user_id', $userId, PDO::PARAM_STR);
+        $stmt->execute();
+
+        return (int) $stmt->fetchColumn();
+    }
+
     /**
      * Borne une limite demandée entre 1 et LIMITE_MAX.
      *

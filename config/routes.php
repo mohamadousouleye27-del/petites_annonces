@@ -157,6 +157,15 @@ return [
         'handler'    => [ModerateurController::class, 'journal'],
         'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'moderateur']],
     ],
+    [
+        // Profil du modérateur CONNECTÉ (lecture seule, GET uniquement).
+        // L'identité affichée provient de la clé de session `user_id` :
+        // aucun paramètre d'URL ne permet de consulter un autre profil.
+        'method'     => 'GET',
+        'path'       => '/moderateur/profil',
+        'handler'    => [ModerateurController::class, 'profil'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'moderateur']],
+    ],
 
     // ============================================
     // Espace Administrateur — rôle requis : admin
@@ -205,6 +214,15 @@ return [
         'method'     => 'GET',
         'path'       => '/admin/journal',
         'handler'    => [AdminController::class, 'journal'],
+        'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'admin']],
+    ],
+    [
+        // Profil de l'administrateur CONNECTÉ (lecture seule, GET uniquement).
+        // L'identité affichée provient de la clé de session `user_id` :
+        // aucun paramètre d'URL ne permet de consulter un autre profil.
+        'method'     => 'GET',
+        'path'       => '/admin/profil',
+        'handler'    => [AdminController::class, 'profil'],
         'middleware' => [AuthMiddleware::class, [RoleMiddleware::class, 'admin']],
     ],
 
